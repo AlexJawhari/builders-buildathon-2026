@@ -28,6 +28,7 @@ def keep_heavy(rest, failed):
 
 
 MIN_EVIDENCE = 6
+GEN_CORE = {"sqlglot/generator.py", "sqlglot/dialects/dialect.py", "sqlglot/generators/base.py"}
 CPU_MUL = 1.6  # scorer CPU per local CPU second (measured on practice)
 CPU_FIX = 0.6  # per-job fixed CPU on the scorer
 P_PASS = 0.55  # share of candidate sets that turn out to fail nothing
@@ -78,6 +79,7 @@ def main():
         canary_all = json.loads((Path(MAP) / "canary.json").read_text())
     except Exception:
         canary_all = []
+    gm = next((t["number"] for t in tests if t["id"].endswith("TestGenerator::test_generator_memory")), None)
     cpu_est = [cpu_map.get(str(t["number"]), t["seconds"]) for t in tests]
     patches = sorted((DATA / "commits").glob("*.patch"))
     out = {}
@@ -126,6 +128,9 @@ def main():
             bits &= ~mp.assumed
             nums = bits_to_nums(bits)
             check = sorted({mp.modname(f) for f in mp.import_files if f.startswith("sqlglot/")})
+            if gm is not None and gm in nums and not any(
+                    fd.path in GEN_CORE or fd.old in GEN_CORE for fd in fds):
+                nums.remove(gm)  # 0 failures in 33 labeled cases; see NOTES (only generator internals can leak)
             heavy = [n for n in nums if tests[n]["seconds"] >= HEAVY]
             rest = [n for n in nums if tests[n]["seconds"] < HEAVY]
             s = sum(cpu_est[n] for n in rest) + sum(
