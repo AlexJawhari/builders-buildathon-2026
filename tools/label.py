@@ -10,6 +10,10 @@ num = {t["id"]: t["number"] for t in tests}
 names = sys.argv[3:] or sorted(os.listdir(mutdir))
 SRC = "/opt/sqlglot"
 pat = re.compile(r"(tests/[\w/]+\.py::\w+::\w+)")
+filepat = re.compile(r"^(?:ERROR|FAILED) (tests/[\w/]+\.py)(?: - |$)")
+by_file = {}
+for t in tests:
+    by_file.setdefault(t["file"], []).append(t["number"])
 for m in names:
     lab = f"{mutdir}/{m}/labels.json"
     if os.path.exists(lab):
@@ -25,14 +29,19 @@ for m in names:
     r = subprocess.run([sys.executable, "-m", "pytest", "tests", "-n", "4", "-q", "-p", "no:cacheprovider",
                         "--timeout=120", "-rfE", "--tb=no"], cwd=root, env=env, capture_output=True, text=True)
     failed = set()
+    unmatched = []
     for line in r.stdout.splitlines():
         if line.startswith(("FAILED", "ERROR", "SUBFAIL")):
             mm = pat.search(line)
-            if mm and mm.group(1) in num:
+            fm = filepat.match(line)
+            if fm and fm.group(1) in by_file:
+                failed.update(by_file[fm.group(1)])  # collection error: every test of the file fails
+            elif mm and mm.group(1) in num:
                 failed.add(num[mm.group(1)])
             elif not mm:
                 failed.add(-1)
+                unmatched.append(line[:200])
     tail = r.stdout.strip().splitlines()[-1:] 
-    json.dump({"failing": sorted(failed), "tail": tail}, open(lab, "w"))
+    json.dump({"failing": sorted(failed), "tail": tail, "unmatched": unmatched[:5]}, open(lab, "w"))
     print(m, sorted(failed)[:10], len(failed), tail, flush=True)
     shutil.rmtree(root, ignore_errors=True)

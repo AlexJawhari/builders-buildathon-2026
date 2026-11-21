@@ -12,7 +12,7 @@ def orig(p):
 nmiss=0
 for cid,a in sorted(ans.items()):
     fds=patchlib.parse(open(f'{ev}/commits/{cid}.patch').read())
-    bits,notes=mp.candidates(fds,orig)
+    bits,notes=mp.candidates(fds,orig); bits|=mp.assumed
     nums=[i for i in range(len(tests)) if bits>>i&1]
     s=sum(tests[i]['seconds'] for i in nums)
     miss_t=[f for f in a['failing'] if not bits>>f&1]

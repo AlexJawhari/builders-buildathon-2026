@@ -65,6 +65,11 @@ def bits_to_nums(b):
 def main():
     tests = json.loads((DATA / "tests.json").read_text())["tests"]
     ms = [round(t["seconds"] * 1000) for t in tests]
+    try:  # measured CPU per test under our runner (sequential, no worker pool); recorded seconds otherwise
+        cpu_map = json.loads((Path(MAP) / "cpu.json").read_text())
+    except Exception:
+        cpu_map = {}
+    cpu_est = [cpu_map.get(str(t["number"]), t["seconds"]) for t in tests]
     patches = sorted((DATA / "commits").glob("*.patch"))
     out = {}
 
@@ -90,7 +95,7 @@ def main():
         except OSError:
             return None
 
-    jobs_todo, cands = [], {}
+    jobs_todo = []
     for p in patches:
         cid = p.stem
         try:
@@ -99,16 +104,14 @@ def main():
             assumed = bits_to_nums(mp.assumed & mp.all_bits)
             bits &= ~mp.assumed
             nums = bits_to_nums(bits)
-            cands[cid] = nums
+            check = sorted({mp.modname(f) for f in mp.import_files if f.startswith("sqlglot/")})
             heavy = [n for n in nums if tests[n]["seconds"] >= HEAVY]
             rest = [n for n in nums if tests[n]["seconds"] < HEAVY]
-            s = sum(ms[n] for n in rest) / 1000
+            s = sum(cpu_est[n] for n in rest)
             printed = pack(rest, ms)[1] / 1000
-            if not nums:
-                emit(cid, pack(assumed, ms)[0])
-            elif not rest or s > RUN_MAX or (not heavy and s * 1.3 + 0.3 > printed):
-                emit(cid, pack(nums + assumed, ms)[0])
-            else:
+            run = bool(rest) and s <= RUN_MAX and (heavy or s * 1.1 + 0.4 <= printed)
+            direct = pack(nums + assumed, ms)[0] if not run else None
+            if run or check:
                 patched = {}
                 for fd in fds:
                     path = fd.old or fd.path
@@ -116,13 +119,17 @@ def main():
                         patched[path] = None
                     elif path.endswith(".py") or path.startswith("tests/"):
                         patched[fd.path] = patchlib.apply(fd, orig(path))
-                jobs_todo.append((cid, patched, rest, heavy, assumed))
-            log(cid, len(nums), round(s, 2), "heavy" if heavy else "", "->", "run" if jobs_todo and jobs_todo[-1][0] == cid else "print")
+                jobs_todo.append(dict(cid=cid, patched=patched, run=rest if run else [], heavy=heavy, assumed=assumed,
+                                      nums=nums, check=check, direct=direct,
+                                      extra={f: mp.import_fail_bits(f) for f in mp.import_files if f.startswith("sqlglot/")}))
+            else:
+                emit(cid, direct if direct is not None else pack(assumed, ms)[0])
+            log(cid, len(nums), round(s, 2), "heavy" if heavy else "", "->", "run" if run else ("check" if check else "print"))
         except Exception:
             log(cid, traceback.format_exc())
             emit(cid, all_workers)
 
-    if jobs_todo:
+    if any(j["run"] for j in jobs_todo):
         for m in ("duckdb", "pandas", "numpy", "unittest", "pickle", "concurrent.futures"):
             try:  # preload once; forked children inherit the imports
                 __import__(m)
@@ -131,34 +138,49 @@ def main():
     budget = 4.5 * len(patches) * 0.7
     running = []
     nproc = 2
+
+    def fallback(j):
+        return pack(j["nums"] + j["assumed"] + (bits_to_nums(0) if not j["extra"] else
+                    bits_to_nums(__import__("functools").reduce(lambda x, y: x | y, j["extra"].values()))), ms)[0]
+
     while jobs_todo or running:
         while jobs_todo and len(running) < nproc:
-            cid, patched, nums, heavy, assumed = jobs_todo.pop(0)
+            j = jobs_todo.pop(0)
             if time.time() - T0 > budget:
-                emit(cid, pack(nums + heavy + assumed, ms)[0])
+                emit(j["cid"], fallback(j))
                 continue
-            limits = {n: max(4.0, 3 * tests[n]["seconds"]) for n in nums}
+            limits = {n: max(4.0, 3 * tests[n]["seconds"]) for n in j["run"]}
             try:
-                j = runner.Job(cid, f"/tmp/ov_{cid}", SRC, patched, tests, nums, limits, time.time() + 40, failfast=bool(heavy))
-                running.append((cid, nums, heavy, assumed, j))
+                job = runner.Job(j["cid"], f"/tmp/ov_{j['cid']}", SRC, j["patched"], tests, j["run"], limits,
+                                 time.time() + 40, failfast=bool(j["heavy"]), check=j["check"])
+                running.append((j, job))
             except Exception:
                 log(traceback.format_exc())
-                emit(cid, pack(nums + heavy + assumed, ms)[0])
+                emit(j["cid"], fallback(j))
         for item in list(running):
-            cid, nums, heavy, assumed, j = item
-            r = j.poll()
-            if r is not None:
-                running.remove(item)
-                log(cid, "ran", len(nums), "failed", len(r.get("failed", [])), "cpu", r.get("cpu"))
-                if r.get("ok"):
-                    if r.get("stopped"):  # heavy kept anyway: the cheap tests ride along for free
-                        final = nums + assumed + heavy
-                    else:
-                        final = list(r["failed"]) + assumed + (heavy if keep_heavy(nums, r["failed"]) else [])
-                    emit(cid, pack(final, ms)[0])
-                else:
-                    log(cid, "run failed", r.get("err"))
-                    emit(cid, pack(nums + heavy + assumed, ms)[0])
+            j, job = item
+            r = job.poll()
+            if r is None:
+                continue
+            running.remove(item)
+            cid = j["cid"]
+            log(cid, "ran", len(j["run"]), "failed", len(r.get("failed", [])), "cpu", r.get("cpu"), r.get("importerr", ""))
+            if not r.get("ok"):
+                log(cid, "run failed", r.get("err"))
+                emit(cid, fallback(j))
+            elif r.get("importerr"):
+                extra = 0
+                for f in j["extra"]:
+                    if mp.modname(f) in r["importerr"]:
+                        extra |= j["extra"][f]
+                emit(cid, pack(j["nums"] + j["assumed"] + bits_to_nums(extra), ms)[0])
+            elif not j["run"]:
+                emit(cid, j["direct"])
+            elif r.get("stopped"):  # heavy kept anyway: the cheap tests ride along for free
+                emit(cid, pack(j["run"] + j["assumed"] + j["heavy"], ms)[0])
+            else:
+                final = list(r["failed"]) + j["assumed"] + (j["heavy"] if keep_heavy(j["run"], r["failed"]) else [])
+                emit(cid, pack(final, ms)[0])
         time.sleep(0.005)
     for p in patches:
         print(json.dumps({"commit": p.stem, "workers": out.get(p.stem, all_workers)}))

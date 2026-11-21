@@ -18,7 +18,7 @@ for d,kind in sets:
         pf=lambda c,d=d: f'{d}/{c}/{c}.patch'
     for c,fl in ans.items():
         bits,_=mp.candidates(patchlib.parse(open(pf(c)).read()),orig)
-        bits&=~mp.assumed
+        bits|=mp.assumed
         cand={i for i in range(len(tests)) if bits>>i&1}
         miss=[f for f in fl if f not in cand]
         h=[x for x in cand if x in H]; r=cand-set(h)

@@ -48,6 +48,47 @@ def mutate_py(rel):
     return None
 
 
+def mutate_py2(rel):
+    """Statement-level mutants: delete a simple statement, return None, tweak a string literal."""
+    text = open(f"{src}/{rel}", encoding="utf-8").read()
+    tree = ast.parse(text)
+    lines = text.split("\n")
+    cands = []
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Assign, ast.AugAssign, ast.Expr, ast.Return)) and n.lineno == n.end_lineno:
+            cands.append(n)
+    if not cands:
+        return None
+    for _ in range(30):
+        n = rnd.choice(cands)
+        ln = lines[n.lineno - 1]
+        kind = rnd.choice(["delete", "none", "str"])
+        new = list(lines)
+        if kind == "delete":
+            new[n.lineno - 1:n.lineno] = []
+        elif kind == "none" and isinstance(n, ast.Return) and n.value is not None:
+            new[n.lineno - 1] = ln[:n.col_offset] + "return None"
+        elif kind == "str":
+            strs = [t for t in ast.walk(n) if isinstance(t, ast.Constant) and isinstance(t.value, str) and len(t.value) > 1 and t.lineno == t.end_lineno]
+            if not strs:
+                continue
+            t = rnd.choice(strs)
+            seg = ln[t.col_offset + 1:t.end_col_offset - 1]
+            if not seg:
+                continue
+            p = rnd.randrange(len(seg))
+            new[n.lineno - 1] = ln[:t.col_offset + 1] + seg[:p] + "X" + seg[p + 1:] + ln[t.end_col_offset - 1:]
+        else:
+            continue
+        res = "\n".join(new)
+        try:
+            compile(res, rel, "exec")
+        except Exception:
+            continue
+        return text, res
+    return None
+
+
 def mutate_fixture(rel):
     text = open(f"{src}/{rel}", encoding="utf-8").read()
     lines = text.split("\n")
@@ -68,7 +109,7 @@ while made < n:
         r = mutate_fixture(rel)
     else:
         rel = rnd.choice(files)
-        r = mutate_py(rel)
+        r = mutate_py2(rel) if rnd.random() < float(os.environ.get("P2", "0")) else mutate_py(rel)
     if not r or r[0] == r[1]:
         continue
     d = f"{out}/m{made:03d}"

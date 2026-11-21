@@ -91,18 +91,21 @@ def changed_old_lines(fd):
     for start, body in fd.hunks:
         o = start
         run = False
+        after_minus = False
         for op, _ in body:
             if op == "-":
                 removed.add(o)
                 o += 1
                 run = False
+                after_minus = True
             elif op == "+":
-                if not run:
+                if not run and not after_minus:  # a '+' block right after '-' is a replacement
                     ins.append((o - 1, o))
-                    run = True
+                run = True
             else:
                 o += 1
                 run = False
+                after_minus = False
     return removed, ins
 
 

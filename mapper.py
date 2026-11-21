@@ -4,6 +4,7 @@ Built from the pinned commit only: per-line coverage per test (data/lines), clas
 (data/classes), files opened per test (data/opens) and static AST/import analysis of the pristine source.
 """
 import ast
+import json
 import marshal
 import os
 import re
@@ -29,6 +30,8 @@ class Mapper:
         self.classes = {k: _bits(v) for k, v in _load(f"{data_dir}/classes.z").items()}
         self.opens = {k: _bits(v) for k, v in _load(f"{data_dir}/opens.z").items()}
         self.imp = {k: set(v) for k, v in _load(f"{data_dir}/imp.z").items()}
+        with open(f"{data_dir}/closure.json") as f:
+            self.closure = json.load(f)  # sqlglot file -> test files whose import loads it
         self._lines, self._any, self._ast, self._text, self._ilines = {}, {}, {}, {}, {}
         self.by_file = {}
         for t in tests:
@@ -177,6 +180,7 @@ class Mapper:
         r = 0
         mod = self.modname(rel)
         if isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef)) and line in own:
+            self._flag = True  # decorators / defaults run at import
             # signature / decorators / defaults: every caller of the function
             r |= self.union_lines(rel, inner.lineno, inner.end_lineno)
             r |= self.importers(rel) if not funcs[:-1] and not classes else 0
@@ -188,8 +192,11 @@ class Mapper:
             if lam is not None:
                 return self.union_lines(rel, lam.lineno, lam.end_lineno)
         r |= self.union_lines(rel, min(own), max(own), imp=not funcs) if own else 0
+        if not funcs:
+            self._flag = True  # module / class body statement: runs at import
         if funcs:
             if own and any(l in self.imp.get(rel, ()) for l in own):
+                self._flag = True
                 # also executed while importing (metaclass / helper): effect reaches import-time state
                 r |= self.any_line(rel) | self.importers(rel)
             return r
@@ -269,13 +276,21 @@ class Mapper:
     def candidates(self, fds, orig):
         """orig(path)->text|None. Returns (bits, notes)."""
         bits, notes, self.assumed = 0, [], 0
+        self.import_files, self._flag = set(), False
+        prev = None
         for fd in fds:
+            if self._flag and prev:
+                self.import_files.add(prev)
+            self._flag, prev = False, (fd.old or fd.path)
             path = fd.old or fd.path
             if path.endswith(".py") and path.startswith("sqlglot/"):
                 old = orig(path)
                 if old is None:
                     continue
                 new = patchlib.apply(fd, old)
+                if new is not None and not self._compiles(new, path):
+                    bits |= self.any_line(path) | self.importers(path)  # import error: everything that loads it
+                    continue
                 if new is not None and patchlib.tokens_equal(old, new):
                     notes.append(f"{path}: tokens equal")
                     continue
@@ -291,6 +306,7 @@ class Mapper:
                         bits |= self.line_bits(path, l)
             elif path.startswith("tests/") and path.endswith(".py"):
                 bits |= self._test_file_bits(fd, orig)
+                self._flag = False
             elif path.startswith("tests/"):
                 fb = self._data_file_bits(path)
                 if self._real_edit(fd):
@@ -301,7 +317,18 @@ class Mapper:
                 bits |= self._data_file_bits(path)  # package data
             else:
                 bits |= self._data_file_bits(path)
+        if self._flag and prev:
+            self.import_files.add(prev)
         return bits & self.all_bits, notes
+
+    def import_fail_bits(self, rel):
+        """Tests that fail when module `rel` cannot be imported."""
+        if rel not in self.closure:
+            return self.all_bits if rel in self.imp else self.any_line(rel) | self.importers(rel)
+        r = self.any_line(rel) | self.importers(rel)
+        for f in self.closure[rel]:
+            r |= self.by_file.get(f, 0)
+        return r
 
     @staticmethod
     def _real_edit(fd):
@@ -311,6 +338,14 @@ class Mapper:
                 if op != " " and t and not t.startswith(("--", "#")):
                     return True
         return False
+
+    @staticmethod
+    def _compiles(text, path):
+        try:
+            compile(text, path, "exec")
+            return True
+        except Exception:
+            return False
 
     def _stmt_neighbors(self, rel, a, b):
         txt = (self.text(rel) or "").split("\n")
@@ -356,7 +391,7 @@ class Mapper:
             tree = ast.parse(old) if old else None
         except Exception:
             pass
-        if fd.new is None or tree is None:
+        if fd.new is None or tree is None or not self._compiles(patchlib.apply(fd, old), path):
             return self.by_file.get(path, 0) | self._test_importers(path)
         removed, ins = patchlib.changed_old_lines(fd)
         lines = set(removed)

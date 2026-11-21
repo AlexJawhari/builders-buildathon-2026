@@ -88,30 +88,52 @@ class _Inline:
         return False
 
 
-def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False):
+def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, check=()):
     """Runs in the forked child; writes a JSON result line to wfd and exits."""
     res = {"failed": [], "ok": True}
     try:
         os.dup2(2, 1)
         sys.stdout = sys.stderr
+        _t = [time.process_time()]
+        def lap(name):
+            if os.environ.get("BLAST_DEBUG"):
+                now = time.process_time()
+                print(f"  [{os.path.basename(root)}] {name} {now - _t[0]:.3f}", file=sys.stderr)
+                _t[0] = now
         build_overlay(root, src, patched)
+        lap("overlay")
         sys.path.insert(0, root)
         os.environ["PYTHONPATH"] = root
         import concurrent.futures as cf
         cf.ProcessPoolExecutor = _Inline
         signal.signal(signal.SIGALRM, _alarm)
+        import importlib
+        bad = []
+        for modname in check:  # a changed module that no longer imports breaks everything that loads it
+            try:
+                signal.setitimer(signal.ITIMER_REAL, 30)
+                importlib.import_module(modname)
+            except BaseException:
+                bad.append(modname)
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        lap("check imports")
+        if bad:
+            res["importerr"] = bad
+            nums = []
         by_cls = {}
         for n in sorted(nums, key=lambda n: tests[n]["id"]):
             f, c, m = tests[n]["id"].split("::")
             by_cls.setdefault((f, c), []).append((m, n))
-        import importlib
         failed = set()
         order = sorted(by_cls.items(), key=lambda kv: sum(tests[n]["seconds"] for _, n in kv[1]))
         for (f, c), items in order:
             try:
                 signal.setitimer(signal.ITIMER_REAL, 30)
+                import sqlglot  # noqa: F401  (timed separately)
+                lap("import sqlglot")
                 cls = getattr(importlib.import_module(f[:-3].replace("/", ".")), c)
                 signal.setitimer(signal.ITIMER_REAL, 0)
+                lap("import " + f)
             except BaseException:
                 signal.setitimer(signal.ITIMER_REAL, 0)
                 failed.update(n for _, n in items)  # an unimportable file fails its tests
@@ -155,6 +177,7 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False):
             except BaseException:
                 failed.update(byname.values())
             signal.setitimer(signal.ITIMER_REAL, 0)
+            lap("run " + c)
             if failfast and failed:
                 break
         res["failed"] = sorted(failed)
@@ -168,13 +191,13 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False):
 
 
 class Job:
-    def __init__(self, cid, root, src, patched, tests, nums, limits, deadline, failfast=False):
+    def __init__(self, cid, root, src, patched, tests, nums, limits, deadline, failfast=False, check=()):
         self.cid, self.nums, self.deadline = cid, nums, deadline
         r, w = os.pipe()
         self.pid = os.fork()
         if self.pid == 0:
             os.close(r)
-            child_main(w, root, src, patched, tests, nums, limits, failfast)
+            child_main(w, root, src, patched, tests, nums, limits, failfast, check)
         os.close(w)
         self.fd, self.buf, self.root = r, b"", root
 
