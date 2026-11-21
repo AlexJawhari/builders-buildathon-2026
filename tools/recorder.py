@@ -8,16 +8,17 @@ E = mon.events
 class Recorder:
     def __init__(self, src, tool_id=2):
         self.src, self.pkg, self.tid = src, src + "/sqlglot/", tool_id
-        self.lines, self.classes = {}, set()
+        self.lines, self.ilines, self.classes = {}, {}, set()
 
     def start(self):
-        pkg, n, lines, classes = self.pkg, len(self.src) + 1, self.lines, self.classes
+        pkg, n, lines, ilines, classes = self.pkg, len(self.src) + 1, self.lines, self.ilines, self.classes
         mon.use_tool_id(self.tid, "rec")
 
         def on_line(code, line):
             fn = code.co_filename
             if fn.startswith(pkg):
-                lines.setdefault(fn[n:], set()).add(line)
+                # CO_OPTIMIZED (0x1) marks function bodies; module and class bodies lack it
+                (lines if code.co_flags & 1 else ilines).setdefault(fn[n:], set()).add(line)
             return mon.DISABLE
 
         def on_start(code, off):
@@ -41,4 +42,4 @@ class Recorder:
             for k in c.__mro__:
                 if k.__module__.startswith("sqlglot"):
                     cn.add(f"{k.__module__}.{k.__qualname__}")
-        return self.lines, cn
+        return self.lines, self.ilines, cn

@@ -65,9 +65,9 @@ def main():
         c0 = time.process_time()
         suite.run(res)
         cpu = time.process_time() - c0
-        lines, cn = rec.stop()
+        lines, ilines, cn = rec.stop()
         ok = res.wasSuccessful() and res.testsRun >= 1 and not res.skipped
-        return dict(lines=lines, classes=cn, opens=sorted(o for o in opens if "/tests/" in o or "fixtures" in o),
+        return dict(lines=lines, ilines=ilines, classes=cn, opens=sorted(o for o in opens if "/tests/" in o or "fixtures" in o),
                     ok=ok, cpu=cpu, skipped=len(res.skipped), err=[str(x[1])[-300:] for x in res.failures + res.errors][:2])
 
     only = set(map(int, os.environ["ONLY"].split(","))) if os.environ.get("ONLY") else None

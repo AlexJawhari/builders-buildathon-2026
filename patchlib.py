@@ -120,3 +120,34 @@ def tokens_equal(a, b):
         return toks(a) == toks(b)
     except Exception:
         return False
+
+
+def changed_spans(fd):
+    """{old line: (start_col, end_col)} for lines replaced 1:1 by a new line: the differing
+    middle after stripping the common prefix and suffix."""
+    spans = {}
+    for start, body in fd.hunks:
+        o, i = start, 0
+        while i < len(body):
+            if body[i][0] == " ":
+                o += 1
+                i += 1
+                continue
+            minus, plus = [], []
+            while i < len(body) and body[i][0] == "-":
+                minus.append((o, body[i][1]))
+                o += 1
+                i += 1
+            while i < len(body) and body[i][0] == "+":
+                plus.append(body[i][1])
+                i += 1
+            if len(minus) == len(plus):
+                for (ln, old), new in zip(minus, plus):
+                    p = 0
+                    while p < min(len(old), len(new)) and old[p] == new[p]:
+                        p += 1
+                    s = 0
+                    while s < min(len(old), len(new)) - p and old[len(old) - 1 - s] == new[len(new) - 1 - s]:
+                        s += 1
+                    spans[ln] = (p, max(len(old) - s, p + 1))
+    return spans

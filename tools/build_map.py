@@ -3,7 +3,9 @@ import glob, os, pickle, sys, zlib, collections, marshal
 
 raw, out = sys.argv[1], sys.argv[2]
 os.makedirs(out + "/lines", exist_ok=True)
+os.makedirs(out + "/ilines", exist_ok=True)
 lines = collections.defaultdict(lambda: collections.defaultdict(int))
+ilines = collections.defaultdict(lambda: collections.defaultdict(int))
 classes = collections.defaultdict(int)
 opens = collections.defaultdict(int)
 bad = []
@@ -15,6 +17,10 @@ for f in glob.glob(raw + "/[0-9]*.pkl"):
     bit = 1 << n
     for fn, ls in r["lines"].items():
         d = lines[fn]
+        for l in ls:
+            d[l] |= bit
+    for fn, ls in r["ilines"].items():
+        d = ilines[fn]
         for l in ls:
             d[l] |= bit
     for c in r["classes"]:
@@ -29,6 +35,10 @@ for f in glob.glob(raw + "/w_*.pkl"):
         d = lines[fn]
         for l in ls:
             d[l] |= bit
+    for fn, ls in r["ilines"].items():
+        d = ilines[fn]
+        for l in ls:
+            d[l] |= bit
     for c in r["classes"]:
         classes[c] |= bit
 print("not ok:", sorted(bad))
@@ -38,6 +48,9 @@ for fn, d in lines.items():
     open(out + "/lines/" + fn.replace("/", "__") + ".z", "wb").write(b)
     tot += len(b)
 print("lines bytes", tot, "files", len(lines))
+for fn, d in ilines.items():
+    b = zlib.compress(marshal.dumps({l: v.to_bytes((v.bit_length() + 7) // 8, "little") for l, v in d.items()}), 9)
+    open(out + "/ilines/" + fn.replace("/", "__") + ".z", "wb").write(b)
 imp = pickle.load(open(raw + "/_import.pkl", "rb"))
 def dump(name, obj):
     b = zlib.compress(marshal.dumps(obj), 9)

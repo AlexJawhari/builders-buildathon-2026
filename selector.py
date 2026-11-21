@@ -19,6 +19,15 @@ DATA = Path(os.environ.get("BLAST_DATA", "/data"))
 SRC = os.environ.get("BLAST_SRC", "/opt/sqlglot")
 MAP = os.environ.get("BLAST_MAP", str(HERE / "data"))
 HEAVY = 3.0  # tests at least this long (recorded seconds) are printed, never run locally
+RUN_MAX = 30.0  # never run more than this many recorded seconds of candidates
+
+
+def keep_heavy(rest, failed):
+    """Heavy candidates are kept when the cheap tests give evidence the change matters."""
+    return bool(failed) or len(rest) < MIN_EVIDENCE
+
+
+MIN_EVIDENCE = 3
 T0 = time.time()
 
 
@@ -30,7 +39,7 @@ def pack(nums, ms):
     """Best split of nums over 1..8 workers (LPT per k), minimising max load + 2 s per worker."""
     if not nums:
         return [], 0
-    items = sorted(nums, key=lambda n: -ms[n])
+    items = sorted(set(nums), key=lambda n: -ms[n])
     best = None
     for k in range(1, min(8, len(items)) + 1):
         loads, ws = [0] * k, [[] for _ in range(k)]
@@ -87,15 +96,18 @@ def main():
         try:
             fds = patchlib.parse(p.read_text(encoding="utf-8", errors="replace"))
             bits, notes = mp.candidates(fds, orig)
+            assumed = bits_to_nums(mp.assumed & mp.all_bits)
+            bits &= ~mp.assumed
             nums = bits_to_nums(bits)
             cands[cid] = nums
             heavy = [n for n in nums if tests[n]["seconds"] >= HEAVY]
-            s = sum(ms[n] for n in nums) / 1000
-            printed = pack(nums, ms)[1] / 1000
+            rest = [n for n in nums if tests[n]["seconds"] < HEAVY]
+            s = sum(ms[n] for n in rest) / 1000
+            printed = pack(rest, ms)[1] / 1000
             if not nums:
-                emit(cid, [])
-            elif heavy or s * 1.3 + 0.3 > printed:
-                emit(cid, pack(nums, ms)[0])
+                emit(cid, pack(assumed, ms)[0])
+            elif not rest or s > RUN_MAX or (not heavy and s * 1.3 + 0.3 > printed):
+                emit(cid, pack(nums + assumed, ms)[0])
             else:
                 patched = {}
                 for fd in fds:
@@ -103,9 +115,8 @@ def main():
                     if fd.new is None:
                         patched[path] = None
                     elif path.endswith(".py") or path.startswith("tests/"):
-                        t = patchlib.apply(fd, orig(path))
-                        patched[fd.path] = t
-                jobs_todo.append((cid, patched, nums))
+                        patched[fd.path] = patchlib.apply(fd, orig(path))
+                jobs_todo.append((cid, patched, rest, heavy, assumed))
             log(cid, len(nums), round(s, 2), "heavy" if heavy else "", "->", "run" if jobs_todo and jobs_todo[-1][0] == cid else "print")
         except Exception:
             log(cid, traceback.format_exc())
@@ -116,27 +127,28 @@ def main():
     nproc = 2
     while jobs_todo or running:
         while jobs_todo and len(running) < nproc:
-            cid, patched, nums = jobs_todo.pop(0)
+            cid, patched, nums, heavy, assumed = jobs_todo.pop(0)
             if time.time() - T0 > budget:
-                emit(cid, pack(nums, ms)[0])
+                emit(cid, pack(nums + heavy + assumed, ms)[0])
                 continue
             limits = {n: max(4.0, 3 * tests[n]["seconds"]) for n in nums}
             try:
                 j = runner.Job(cid, f"/tmp/ov_{cid}", SRC, patched, tests, nums, limits, time.time() + 40)
-                running.append((cid, nums, j))
+                running.append((cid, nums, heavy, assumed, j))
             except Exception:
                 log(traceback.format_exc())
-                emit(cid, pack(nums, ms)[0])
+                emit(cid, pack(nums + heavy + assumed, ms)[0])
         for item in list(running):
-            cid, nums, j = item
+            cid, nums, heavy, assumed, j = item
             r = j.poll()
             if r is not None:
                 running.remove(item)
                 if r.get("ok"):
-                    emit(cid, pack(r["failed"], ms)[0])
+                    final = list(r["failed"]) + assumed + (heavy if keep_heavy(nums, r["failed"]) else [])
+                    emit(cid, pack(final, ms)[0])
                 else:
                     log(cid, "run failed", r.get("err"))
-                    emit(cid, pack(nums, ms)[0])
+                    emit(cid, pack(nums + heavy + assumed, ms)[0])
         time.sleep(0.005)
     for p in patches:
         print(json.dumps({"commit": p.stem, "workers": out.get(p.stem, all_workers)}))

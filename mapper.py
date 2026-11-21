@@ -29,7 +29,7 @@ class Mapper:
         self.classes = {k: _bits(v) for k, v in _load(f"{data_dir}/classes.z").items()}
         self.opens = {k: _bits(v) for k, v in _load(f"{data_dir}/opens.z").items()}
         self.imp = {k: set(v) for k, v in _load(f"{data_dir}/imp.z").items()}
-        self._lines, self._any, self._ast, self._text = {}, {}, {}, {}
+        self._lines, self._any, self._ast, self._text, self._ilines = {}, {}, {}, {}, {}
         self.by_file = {}
         for t in tests:
             self.by_file[t["file"]] = self.by_file.get(t["file"], 0) | (1 << t["number"])
@@ -45,7 +45,18 @@ class Mapper:
             a = 0
             for v in d.values():
                 a |= v
+            for v in self.ilines(rel).values():
+                a |= v
             self._any[rel] = a
+        return d
+
+    def ilines(self, rel):
+        """Module/class-body lines executed inside a test (lazy imports)."""
+        d = self._ilines.get(rel)
+        if d is None:
+            p = f"{self.data}/ilines/{rel.replace('/', '__')}.z"
+            d = {l: _bits(v) for l, v in _load(p).items()} if os.path.exists(p) else {}
+            self._ilines[rel] = d
         return d
 
     def any_line(self, rel):
@@ -75,11 +86,13 @@ class Mapper:
         m = rel[:-3].replace("/", ".")
         return m[: -len(".__init__")] if m.endswith(".__init__") else m
 
-    def union_lines(self, rel, lo, hi):
-        d = self.lines(rel)
+    def union_lines(self, rel, lo, hi, imp=False):
+        d, di = self.lines(rel), self.ilines(rel)
         r = 0
         for l in range(lo, hi + 1):
             r |= d.get(l, 0)
+            if imp:
+                r |= di.get(l, 0)
         return r
 
     def files_mentioning(self, word, exclude=None):
@@ -149,7 +162,7 @@ class Mapper:
             inner |= set(range(min([k.lineno] + [d.lineno for d in getattr(k, "decorator_list", [])]), k.end_lineno + 1))
         return set(range(lo, n.end_lineno + 1)) - inner
 
-    def line_bits(self, rel, line, refine=True):
+    def line_bits(self, rel, line, refine=True, span=None):
         """Candidate bits for a change at old-file `line` of sqlglot source file rel."""
         tree = self.tree(rel)
         if tree is None:
@@ -170,7 +183,11 @@ class Mapper:
             if not funcs[:-1]:
                 r |= self._class_bits(mod, classes)
             return r
-        r |= self.union_lines(rel, min(own), max(own)) if own else 0
+        if not funcs and span and not isinstance(inner, ast.ClassDef):
+            lam = self._lambda_at(inner, line, span)
+            if lam is not None:
+                return self.union_lines(rel, lam.lineno, lam.end_lineno)
+        r |= self.union_lines(rel, min(own), max(own), imp=not funcs) if own else 0
         if funcs:
             if own and any(l in self.imp.get(rel, ()) for l in own):
                 # also executed while importing (metaclass / helper): effect reaches import-time state
@@ -190,6 +207,20 @@ class Mapper:
         if ub is None:
             return r | self.any_line(rel) | self.importers(rel)
         return r | ub
+
+    @staticmethod
+    def _lambda_at(stmt, line, span):
+        """Innermost Lambda of stmt that contains the whole changed span on `line`, else None."""
+        best = None
+        for n in ast.walk(stmt):
+            if isinstance(n, ast.Lambda):
+                a, b = (n.lineno, n.col_offset), (n.end_lineno, n.end_col_offset)
+                if a <= (line, span[0]) and (line, span[1]) <= b:
+                    # the lambda's own parameters/defaults stay with the enclosing statement
+                    if (line, span[0]) < (n.body.lineno, n.body.col_offset):
+                        continue
+                    best = n
+        return best
 
     @staticmethod
     def _assigned(stmt):
@@ -237,7 +268,7 @@ class Mapper:
     # ---- patch level
     def candidates(self, fds, orig):
         """orig(path)->text|None. Returns (bits, notes)."""
-        bits, notes = 0, []
+        bits, notes, self.assumed = 0, [], 0
         for fd in fds:
             path = fd.old or fd.path
             if path.endswith(".py") and path.startswith("sqlglot/"):
@@ -252,20 +283,34 @@ class Mapper:
                     bits |= self.any_line(path) | self.importers(path)
                     continue
                 removed, ins = patchlib.changed_old_lines(fd)
+                spans = patchlib.changed_spans(fd)
                 for l in sorted(removed):
-                    bits |= self.line_bits(path, l)
+                    bits |= self.line_bits(path, l, span=spans.get(l))
                 for a, b in ins:
                     for l in self._stmt_neighbors(path, a, b):
                         bits |= self.line_bits(path, l)
             elif path.startswith("tests/") and path.endswith(".py"):
                 bits |= self._test_file_bits(fd, orig)
             elif path.startswith("tests/"):
-                bits |= self._data_file_bits(path)
+                fb = self._data_file_bits(path)
+                if self._real_edit(fd):
+                    self.assumed |= fb  # a corrupted fixture line fails its reader: print, don't run
+                else:
+                    bits |= fb
             elif path.startswith("sqlglot"):
                 bits |= self._data_file_bits(path)  # package data
             else:
                 bits |= self._data_file_bits(path)
         return bits & self.all_bits, notes
+
+    @staticmethod
+    def _real_edit(fd):
+        for _, body in fd.hunks:
+            for op, t in body:
+                t = t.strip()
+                if op != " " and t and not t.startswith(("--", "#")):
+                    return True
+        return False
 
     def _stmt_neighbors(self, rel, a, b):
         txt = (self.text(rel) or "").split("\n")
