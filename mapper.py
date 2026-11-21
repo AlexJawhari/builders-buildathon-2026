@@ -30,6 +30,10 @@ class Mapper:
         self.classes = {k: _bits(v) for k, v in _load(f"{data_dir}/classes.z").items()}
         self.opens = {k: _bits(v) for k, v in _load(f"{data_dir}/opens.z").items()}
         self.imp = {k: set(v) for k, v in _load(f"{data_dir}/imp.z").items()}
+        o = _load(f"{data_dir}/impfiles.z")  # lines/classes executed while importing each test file
+        self.imp_files = o["files"]
+        self.imp_lines = o["lines"]
+        self.imp_classes = {k: _bits(v) for k, v in o["classes"].items()}
         with open(f"{data_dir}/closure.json") as f:
             self.closure = json.load(f)  # sqlglot file -> test files whose import loads it
         self._lines, self._any, self._ast, self._text, self._ilines = {}, {}, {}, {}, {}
@@ -165,7 +169,35 @@ class Mapper:
             inner |= set(range(min([k.lineno] + [d.lineno for d in getattr(k, "decorator_list", [])]), k.end_lineno + 1))
         return set(range(lo, n.end_lineno + 1)) - inner
 
+    def _imp_tests(self, bits):
+        """Remember the test files whose import ran the changed code; the runner re-imports them
+        patched (an import error fails every test of the file) instead of assuming the worst."""
+        i = 0
+        while bits:
+            if bits & 1:
+                self.imp_hit.add(self.imp_files[i])
+            bits >>= 1
+            i += 1
+        return 0
+
     def line_bits(self, rel, line, refine=True, span=None):
+        r = self._line_bits(rel, line, refine, span)
+        # a changed statement that runs while a test file is imported can break every test of that file
+        d = self.imp_lines.get(rel)
+        if d:
+            tree = self.tree(rel)
+            chain = self._chain(tree, line) if tree is not None else []
+            own = self._own_range(chain[-1]) if chain else {line}
+            ib = 0
+            for l in own:
+                v = d.get(l)
+                if v:
+                    ib |= _bits(v)
+            if ib:
+                r |= self._imp_tests(ib)
+        return r
+
+    def _line_bits(self, rel, line, refine=True, span=None):
         """Candidate bits for a change at old-file `line` of sqlglot source file rel."""
         tree = self.tree(rel)
         if tree is None:
@@ -270,13 +302,15 @@ class Mapper:
             return 0
         q = mod + "." + ".".join(c.name for c in classes)
         r = self.classes.get(q, 0)
+        if q in self.imp_classes:
+            r |= self._imp_tests(self.imp_classes[q])
         return r
 
     # ---- patch level
     def candidates(self, fds, orig):
         """orig(path)->text|None. Returns (bits, notes)."""
         bits, notes, self.assumed = 0, [], 0
-        self.import_files, self._flag = set(), False
+        self.import_files, self._flag, self.imp_hit = set(), False, set()
         prev = None
         for fd in fds:
             if self._flag and prev:
