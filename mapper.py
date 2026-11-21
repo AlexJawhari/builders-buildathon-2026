@@ -32,6 +32,8 @@ class Mapper:
         self.imp = {k: set(v) for k, v in _load(f"{data_dir}/imp.z").items()}
         with open(f"{data_dir}/modtouch.json") as f:
             self.modtouch = json.load(f)  # class -> modules whose import instantiates it
+        if os.environ.get("BLAST_NO_MODTOUCH"):  # evaluation only: simulate the missing map
+            self.modtouch = {}
         with open(f"{data_dir}/closure.json") as f:
             self.closure = json.load(f)  # sqlglot file -> test files whose import loads it
         self._lines, self._any, self._ast, self._text, self._ilines = {}, {}, {}, {}, {}
