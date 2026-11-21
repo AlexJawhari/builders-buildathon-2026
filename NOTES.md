@@ -17,3 +17,11 @@ or print candidates packed over <=8 workers. Comment-only .py changes are droppe
 - Heavy gamble (drop tpcds etc. when the cheap candidates all pass): 0 of 9 labeled cases where heavy failed with R passing; collecting more labels (tools/gamble.py).
 - Fixture edits: any non-comment changed line => reader tests printed without running (12/12 sample fixture commits fail their reader). KEEP.
 - Class/module-level edits: tests touching class (MRO of self/cls seen in frames) intersected with tests running lines that mention the assigned name (def-use), fallback to whole class when usage is import-time only. WEEK_OFFSET commit 171 -> 12 candidates. KEEP.
+- Fail-fast: when heavy candidates exist the cheap run only decides "keep heavy?"; stop at first failure and print all cheap candidates alongside (hidden under the heavy worker's wall time). Sample CPU 52 -> 36 s. KEEP.
+- Measured per-test CPU under our runner (tools/cpuprof.py, data/cpu.json): total 21.8 s vs 38.7 s recorded; only TestExecutor.setUpClass is costly (0.9 s). Used for run-vs-print decision. KEEP.
+- Import-time statements (class/module body, decorators, defaults): runner imports the changed modules first; an import error means every test that loads the module fails (data/closure.json = test files whose import loads each module). Found by mutant m063 (`set + set` at module level, 150 failing tests). KEEP.
+- changed_old_lines: a '+' block directly after '-' is a replacement, not an insertion (insertion neighbours blew candidate sets to the whole class). KEEP.
+- Heavy gamble off vs on on sample+mutants: ~30% cheaper with it; 0 observed heavy-only failures so far. Risk is a 300 s miss when a heavy test is the only failing one; unproven.
+- Dropped: running only cheap tests as evidence (0/17 observed misses but sample too small for a 300 s penalty).
+- Runner false failures: two tests (test_enum, starrocks roundtrip) fail in-process on a big run but pass under pytest (state leakage); only costs seconds.
+- RESULT sample (30 commits): simulated 94.351 s, 0 misses, container CPU 37.4 s (cgroup cpu.stat, wall 22 s) => about 131.7. Mutants (67, one-token edits + fixtures): simulated 277.4 s, 0 misses, CPU 139 s.

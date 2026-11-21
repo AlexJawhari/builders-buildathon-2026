@@ -6,8 +6,9 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 SKIP_INTEGRATION=0
 COPY requirements.lock /tmp/requirements.lock
 RUN pip install --no-cache-dir -r /tmp/requirements.lock
 # sqlglot at the pinned commit (GitHub archive of that exact sha), used as the pristine tree
-RUN python -c "import urllib.request,tarfile,io; d=urllib.request.urlopen('https://github.com/tobymao/sqlglot/archive/eb11aec4be8cb2122afe713a4816662c3f0fb2fa.tar.gz').read(); tarfile.open(fileobj=io.BytesIO(d)).extractall('/tmp/x')" \
- && mv /tmp/x/sqlglot-* /opt/sqlglot && rm -rf /tmp/x \
+COPY tools/fetch.py /tmp/fetch.py
+RUN for i in 1 2 3 4 5; do python /tmp/fetch.py && break || sleep 10; done \
+ && mv /tmp/x/sqlglot-* /opt/sqlglot && rm -rf /tmp/x /tmp/fetch.py \
  && python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests \
  && chmod -R a+rX /opt/sqlglot
 COPY selector.py patchlib.py mapper.py runner.py /app/

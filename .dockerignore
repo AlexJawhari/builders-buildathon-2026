@@ -1,5 +1,6 @@
 sample
 output.jsonl
-tools
+tools/*
+!tools/fetch.py
 .git
 NOTES.md

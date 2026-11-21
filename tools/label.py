@@ -26,7 +26,7 @@ for m in names:
     shutil.rmtree(root, ignore_errors=True)
     runner.build_overlay(root, SRC, patched)
     env = dict(os.environ, PYTHONPATH=root, SKIP_INTEGRATION="0")
-    r = subprocess.run([sys.executable, "-m", "pytest", "tests", "-n", "4", "-q", "-p", "no:cacheprovider",
+    r = subprocess.run([sys.executable, "-m", "pytest", "tests", "-n", os.environ.get("LABEL_N", "2"), "-q", "-p", "no:cacheprovider",
                         "--timeout=120", "-rfE", "--tb=no"], cwd=root, env=env, capture_output=True, text=True)
     failed = set()
     unmatched = []
