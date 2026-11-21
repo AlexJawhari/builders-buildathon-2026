@@ -108,8 +108,7 @@ def main():
             assumed = bits_to_nums(mp.assumed & mp.all_bits)
             bits &= ~mp.assumed
             nums = bits_to_nums(bits)
-            check_files = {f for f in mp.import_files if f.startswith("sqlglot/")} | set(mp.imp_hit)
-            check = sorted({mp.modname(f) for f in check_files})
+            check = sorted({mp.modname(f) for f in mp.import_files if f.startswith("sqlglot/")})
             heavy = [n for n in nums if tests[n]["seconds"] >= HEAVY]
             rest = [n for n in nums if tests[n]["seconds"] < HEAVY]
             s = sum(cpu_est[n] for n in rest) + sum(
@@ -128,8 +127,7 @@ def main():
                         patched[fd.path] = patchlib.apply(fd, orig(path))
                 jobs_todo.append(dict(cid=cid, patched=patched, run=rest if run else [], heavy=heavy, assumed=assumed,
                                       nums=nums, check=check, direct=direct,
-                                      extra={f: (mp.import_fail_bits(f) if f.startswith("sqlglot/") else mp.by_file[f] | mp._test_importers(f))
-                                             for f in check_files}))
+                                      extra={f: mp.import_fail_bits(f) for f in mp.import_files if f.startswith("sqlglot/")}))
             else:
                 emit(cid, direct if direct is not None else pack(assumed, ms)[0])
             log(cid, len(nums), round(s, 2), "heavy" if heavy else "", "->", "run" if run else ("check" if check else "print"))
