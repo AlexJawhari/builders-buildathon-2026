@@ -139,7 +139,7 @@ def main():
                 continue
             limits = {n: max(4.0, 3 * tests[n]["seconds"]) for n in nums}
             try:
-                j = runner.Job(cid, f"/tmp/ov_{cid}", SRC, patched, tests, nums, limits, time.time() + 40)
+                j = runner.Job(cid, f"/tmp/ov_{cid}", SRC, patched, tests, nums, limits, time.time() + 40, failfast=bool(heavy))
                 running.append((cid, nums, heavy, assumed, j))
             except Exception:
                 log(traceback.format_exc())
@@ -149,8 +149,12 @@ def main():
             r = j.poll()
             if r is not None:
                 running.remove(item)
+                log(cid, "ran", len(nums), "failed", len(r.get("failed", [])), "cpu", r.get("cpu"))
                 if r.get("ok"):
-                    final = list(r["failed"]) + assumed + (heavy if keep_heavy(nums, r["failed"]) else [])
+                    if r.get("stopped"):  # heavy kept anyway: the cheap tests ride along for free
+                        final = nums + assumed + heavy
+                    else:
+                        final = list(r["failed"]) + assumed + (heavy if keep_heavy(nums, r["failed"]) else [])
                     emit(cid, pack(final, ms)[0])
                 else:
                     log(cid, "run failed", r.get("err"))

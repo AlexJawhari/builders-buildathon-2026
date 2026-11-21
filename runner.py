@@ -88,7 +88,7 @@ class _Inline:
         return False
 
 
-def child_main(wfd, root, src, patched, tests, nums, limits):
+def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False):
     """Runs in the forked child; writes a JSON result line to wfd and exits."""
     res = {"failed": [], "ok": True}
     try:
@@ -106,7 +106,8 @@ def child_main(wfd, root, src, patched, tests, nums, limits):
             by_cls.setdefault((f, c), []).append((m, n))
         import importlib
         failed = set()
-        for (f, c), items in by_cls.items():
+        order = sorted(by_cls.items(), key=lambda kv: sum(tests[n]["seconds"] for _, n in kv[1]))
+        for (f, c), items in order:
             try:
                 signal.setitimer(signal.ITIMER_REAL, 30)
                 cls = getattr(importlib.import_module(f[:-3].replace("/", ".")), c)
@@ -127,6 +128,8 @@ def child_main(wfd, root, src, patched, tests, nums, limits):
                     super().stopTest(test)
 
                 def _mark(self, test):
+                    if failfast:
+                        self.stop()
                     n = byname.get(getattr(test, "_testMethodName", None))
                     if n is None:  # setUpClass / tearDownClass / module fixture failure
                         failed.update(byname.values())
@@ -152,7 +155,10 @@ def child_main(wfd, root, src, patched, tests, nums, limits):
             except BaseException:
                 failed.update(byname.values())
             signal.setitimer(signal.ITIMER_REAL, 0)
+            if failfast and failed:
+                break
         res["failed"] = sorted(failed)
+        res["stopped"] = bool(failfast and failed)
     except BaseException as e:  # any internal failure: caller falls back to printing candidates
         res = {"failed": [], "ok": False, "err": repr(e)[:200]}
     try:
@@ -162,13 +168,13 @@ def child_main(wfd, root, src, patched, tests, nums, limits):
 
 
 class Job:
-    def __init__(self, cid, root, src, patched, tests, nums, limits, deadline):
+    def __init__(self, cid, root, src, patched, tests, nums, limits, deadline, failfast=False):
         self.cid, self.nums, self.deadline = cid, nums, deadline
         r, w = os.pipe()
         self.pid = os.fork()
         if self.pid == 0:
             os.close(r)
-            child_main(w, root, src, patched, tests, nums, limits)
+            child_main(w, root, src, patched, tests, nums, limits, failfast)
         os.close(w)
         self.fd, self.buf, self.root = r, b"", root
 
@@ -184,7 +190,9 @@ class Job:
                 break
             self.buf += chunk
         try:
-            pid, _ = os.waitpid(self.pid, os.WNOHANG)
+            pid, _, ru = os.wait4(self.pid, os.WNOHANG)
+            if pid:
+                self.cpu = ru.ru_utime + ru.ru_stime
         except ChildProcessError:
             pid = self.pid
         if pid == 0:
@@ -207,6 +215,7 @@ class Job:
             return self._finish({"ok": False, "failed": [], "err": "no result"})
 
     def _finish(self, res):
+        res["cpu"] = getattr(self, "cpu", None)
         os.close(self.fd)
         import shutil
         shutil.rmtree(self.root, ignore_errors=True)
