@@ -107,7 +107,9 @@ def main():
             check = sorted({mp.modname(f) for f in mp.import_files if f.startswith("sqlglot/")})
             heavy = [n for n in nums if tests[n]["seconds"] >= HEAVY]
             rest = [n for n in nums if tests[n]["seconds"] < HEAVY]
-            s = sum(cpu_est[n] for n in rest)
+            s = sum(cpu_est[n] for n in rest) + sum(
+                cpu_map.get("class:%s::%s" % (f, c), 0.0)
+                for f, c in {tuple(tests[n]["id"].split("::")[:2]) for n in rest})
             printed = pack(rest, ms)[1] / 1000
             run = bool(rest) and s <= RUN_MAX and (heavy or s * 1.1 + 0.4 <= printed)
             direct = pack(nums + assumed, ms)[0] if not run else None
