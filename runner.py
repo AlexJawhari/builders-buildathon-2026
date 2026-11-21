@@ -52,6 +52,42 @@ def build_overlay(root, src, patched):
                 f.write(text)
 
 
+class _Inline:
+    """Synchronous stand-in for ProcessPoolExecutor: spawned workers cost far more CPU than the
+    work itself (each re-imports duckdb/pandas), and the tests only need the results."""
+
+    def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=(), **kw):
+        if initializer:
+            initializer(*initargs)
+
+    def submit(self, fn, *a, **k):
+        import concurrent.futures as cf
+        import pickle
+        f = cf.Future()
+        try:  # round-trip through pickle like a real worker (sqlglot pickles via serde)
+            fn, a, k = pickle.loads(pickle.dumps((fn, a, k)))
+            f.set_result(pickle.loads(pickle.dumps(fn(*a, **k))))
+        except Exception as e:
+            try:
+                e = pickle.loads(pickle.dumps(e))
+            except Exception:
+                pass
+            f.set_exception(e)
+        return f
+
+    def map(self, fn, *its, **kw):
+        return map(fn, *its)
+
+    def shutdown(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
 def child_main(wfd, root, src, patched, tests, nums, limits):
     """Runs in the forked child; writes a JSON result line to wfd and exits."""
     res = {"failed": [], "ok": True}
@@ -61,34 +97,62 @@ def child_main(wfd, root, src, patched, tests, nums, limits):
         build_overlay(root, src, patched)
         sys.path.insert(0, root)
         os.environ["PYTHONPATH"] = root
+        import concurrent.futures as cf
+        cf.ProcessPoolExecutor = _Inline
         signal.signal(signal.SIGALRM, _alarm)
         by_cls = {}
         for n in sorted(nums, key=lambda n: tests[n]["id"]):
             f, c, m = tests[n]["id"].split("::")
             by_cls.setdefault((f, c), []).append((m, n))
         import importlib
+        failed = set()
         for (f, c), items in by_cls.items():
-            mod_name = f[:-3].replace("/", ".")
             try:
                 signal.setitimer(signal.ITIMER_REAL, 30)
-                mod = importlib.import_module(mod_name)
-                cls = getattr(mod, c)
+                cls = getattr(importlib.import_module(f[:-3].replace("/", ".")), c)
                 signal.setitimer(signal.ITIMER_REAL, 0)
             except BaseException:
                 signal.setitimer(signal.ITIMER_REAL, 0)
-                res["failed"] += [n for _, n in items]  # an unimportable file fails its tests
+                failed.update(n for _, n in items)  # an unimportable file fails its tests
                 continue
-            for m, n in items:
-                r = unittest.TestResult()
-                suite = unittest.TestSuite([cls(m)])
-                signal.setitimer(signal.ITIMER_REAL, limits.get(n, 10))
-                try:
-                    suite.run(r)
-                except BaseException:
-                    r.errors.append(("t", "timeout"))
-                signal.setitimer(signal.ITIMER_REAL, 0)
-                if not r.wasSuccessful():
-                    res["failed"].append(n)
+            byname = {m: n for m, n in items}
+
+            class R(unittest.TestResult):
+                def startTest(self, test):
+                    super().startTest(test)
+                    signal.setitimer(signal.ITIMER_REAL, limits.get(byname.get(test._testMethodName), 10))
+
+                def stopTest(self, test):
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    super().stopTest(test)
+
+                def _mark(self, test):
+                    n = byname.get(getattr(test, "_testMethodName", None))
+                    if n is None:  # setUpClass / tearDownClass / module fixture failure
+                        failed.update(byname.values())
+                    else:
+                        failed.add(n)
+
+                def addFailure(self, test, err):
+                    self._mark(test)
+
+                def addError(self, test, err):
+                    self._mark(test)
+
+                def addSubTest(self, test, subtest, err):
+                    if err is not None:
+                        self._mark(test)
+
+                def addUnexpectedSuccess(self, test):
+                    self._mark(test)
+
+            suite = unittest.TestSuite([cls(m) for m, _ in items])
+            try:
+                suite.run(R())
+            except BaseException:
+                failed.update(byname.values())
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        res["failed"] = sorted(failed)
     except BaseException as e:  # any internal failure: caller falls back to printing candidates
         res = {"failed": [], "ok": False, "err": repr(e)[:200]}
     try:

@@ -122,6 +122,12 @@ def main():
             log(cid, traceback.format_exc())
             emit(cid, all_workers)
 
+    if jobs_todo:
+        for m in ("duckdb", "pandas", "numpy", "unittest", "pickle", "concurrent.futures"):
+            try:  # preload once; forked children inherit the imports
+                __import__(m)
+            except Exception:
+                pass
     budget = 4.5 * len(patches) * 0.7
     running = []
     nproc = 2

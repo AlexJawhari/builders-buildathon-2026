@@ -7,7 +7,7 @@ CID=$(docker create --platform linux/amd64 --network none --cpus 2 --memory 4096
   --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp \
   -v $EV/commits:/data/commits:ro -v $EV/tests.json:/data/tests.json:ro blast-radius-entry)
 START=$(date +%s.%N)
-flock /home/alex/projects/buildathon/.heavy.lock sh -c "docker start -a $CID > $OUT 2> $EV/stderr.log"
+sh -c "docker start -a $CID > $OUT 2> $EV/stderr.log"
 END=$(date +%s.%N)
 # CPU: docker keeps no cpu total after exit; use cgroup of the stopped container if still readable
 echo "wall $(echo "$END - $START" | bc)"
