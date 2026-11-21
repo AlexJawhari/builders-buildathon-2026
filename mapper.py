@@ -119,16 +119,28 @@ class Mapper:
                         self._sf.append(os.path.relpath(f"{dp}/{f}", self.src))
         return self._sf
 
-    def importers(self, rel):
-        """Bits of tests that executed anything in a sqlglot file that imports module `rel`."""
+    def importer_files(self, rel):
+        """Source files that import module `rel` (or names from it)."""
         mod = self.modname(rel)
         leaf = mod.rsplit(".", 1)[-1]
-        pat = re.compile(r"(from\s+%s\s+import|import\s+%s\b|from\s+%s\s+import\s+[^\n]*\b%s\b)" % (
-            re.escape(mod), re.escape(mod), re.escape(mod.rsplit(".", 1)[0]), re.escape(leaf)))
+        pkg = mod.rsplit(".", 1)[0]
+        direct = re.compile(r"(from\s+%s\s+import|import\s+%s\b)" % (re.escape(mod), re.escape(mod)))
+        sub = re.compile(r"from\s+%s\s+import\s+(\([^)]*\)|[^\n]*)" % re.escape(pkg))
+        leafw = re.compile(r"\b%s\b" % re.escape(leaf))
+
+        class _P:
+            @staticmethod
+            def search(text):
+                return direct.search(text) or any(leafw.search(g) for g in sub.findall(text))
+
+        pat = _P
+        return [f for f in self.sqlglot_files() if f != rel and pat.search(self.text(f) or "")]
+
+    def importers(self, rel):
+        """Bits of tests that executed anything in a sqlglot file that imports module `rel`."""
         r = 0
-        for f in self.sqlglot_files():
-            if f != rel and pat.search(self.text(f) or ""):
-                r |= self.any_line(f)
+        for f in self.importer_files(rel):
+            r |= self.any_line(f)
         return r
 
     # ---- scope analysis of one old-file line

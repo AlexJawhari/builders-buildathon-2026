@@ -126,7 +126,10 @@ def main():
             assumed = bits_to_nums(mp.assumed & mp.all_bits)
             bits &= ~mp.assumed
             nums = bits_to_nums(bits)
-            check = sorted({mp.modname(f) for f in mp.import_files if f.startswith("sqlglot/")})
+            check_files = {f for f in mp.import_files if f.startswith("sqlglot/")}
+            for f in list(check_files):  # a renamed/removed name breaks the modules that import it
+                check_files.update(mp.importer_files(f))
+            check = sorted({mp.modname(f) for f in check_files})
             if gm is not None and gm in nums and not any(
                     fd.path in GEN_CORE or fd.old in GEN_CORE for fd in fds):
                 nums.remove(gm)  # 0 failures in 33 labeled cases; see NOTES (only generator internals can leak)
@@ -151,7 +154,7 @@ def main():
                 canary = [n for n in canary_all if n not in set(nums)] if check else []
                 jobs_todo.append(dict(cid=cid, patched=patched, run=rest if run else [], heavy=heavy, assumed=assumed, canary=canary,
                                       nums=nums, check=check, direct=direct,
-                                      extra={f: mp.import_fail_bits(f) for f in mp.import_files if f.startswith("sqlglot/")}))
+                                      extra={f: mp.import_fail_bits(f) for f in check_files}))
             else:
                 emit_set(cid, direct if direct is not None else assumed)
             log(cid, len(nums), round(s, 2), "heavy" if heavy else "", "->", "run" if run else ("check" if check else "print"))
