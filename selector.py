@@ -29,9 +29,8 @@ def keep_heavy(rest, failed):
 
 MIN_EVIDENCE = 6
 GEN_CORE = {"sqlglot/generator.py", "sqlglot/dialects/dialect.py", "sqlglot/generators/base.py"}
-CPU_MUL = 1.6  # scorer CPU per local CPU second (measured on practice)
-CPU_FIX = 0.6  # per-job fixed CPU on the scorer
-P_PASS = 0.55  # share of candidate sets that turn out to fail nothing
+RUN_MUL = 1.1
+RUN_FIX = 0.4
 WIDE_COUNT = 0.5  # ... or when it already names this fraction of all tests
 WIDE = 0.8  # print everything when the chosen set costs this fraction of printing everything
 T0 = time.time()
@@ -137,9 +136,9 @@ def main():
                 cpu_map.get("class:%s::%s" % (f, c), 0.0)
                 for f, c in {tuple(tests[n]["id"].split("::")[:2]) for n in rest})
             printed = pack(rest, ms)[1] / 1000
-            cost_run = CPU_MUL * s + CPU_FIX
-            full = pack(rest + heavy, ms)[1] / 1000
-            run = bool(rest) and s <= RUN_MAX and cost_run < P_PASS * full
+            # run when it is cheaper than printing (a run that finds nothing prints [] = 0): measured on
+            # practice, preferring print overshot (+81 simulated for -53 CPU)
+            run = bool(rest) and s <= RUN_MAX and (bool(heavy) or s * RUN_MUL + RUN_FIX <= printed)
             direct = nums + assumed if not run else None
             if run or check:
                 patched = {}
@@ -211,7 +210,21 @@ def main():
                 emit_set(cid, j["nums"] + j["assumed"] + bits_to_nums(extra))
             elif r.get("smoke_fail") or (set(r.get("failed", [])) & set(j["canary"])):
                 log(cid, "canary alarm", r.get("smoke_fail"), sorted(set(r.get("failed", [])) & set(j["canary"]))[:5])
-                emit(cid, all_workers)  # wide blast radius: print everything
+                # wide blast radius: everything that loads the failing dialects / lives in the failing canary files
+                extra = 0
+                for f in j["extra"].values():
+                    extra |= f
+                for d in r.get("smoke_fail") or []:
+                    for k in ("dialects", "generators", "parsers"):
+                        rel = f"sqlglot/{k}/{d}.py"
+                        if rel in mp.closure or os.path.exists(f"{SRC}/{rel}"):
+                            extra |= mp.import_fail_bits(rel)
+                    extra |= mp.by_file.get(f"tests/dialects/test_{d}.py", 0)
+                if "<import>" in (r.get("smoke_fail") or []):
+                    extra = mp.all_bits
+                for n in set(r.get("failed", [])) & set(j["canary"]):
+                    extra |= mp.by_file.get(tests[n]["file"], 0)
+                emit_set(cid, j["nums"] + j["assumed"] + bits_to_nums(extra))
             elif not j["run"]:
                 emit_set(cid, j["direct"])
             elif r.get("stopped"):  # heavy kept anyway: the cheap tests ride along for free
