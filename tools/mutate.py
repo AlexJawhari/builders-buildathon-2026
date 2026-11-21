@@ -89,6 +89,73 @@ def mutate_py2(rel):
     return None
 
 
+def mutate_class(rel):
+    """Class-body edits: flip a constant, drop a dict entry, or edit a set/dict literal."""
+    text = open(f"{src}/{rel}", encoding="utf-8").read()
+    tree = ast.parse(text)
+    lines = text.split("\n")
+    cands = []
+    for c in ast.walk(tree):
+        if isinstance(c, ast.ClassDef):
+            for n in c.body:
+                if isinstance(n, (ast.Assign, ast.AnnAssign)) and n.value is not None:
+                    cands.append(n)
+    if not cands:
+        return None
+    for _ in range(30):
+        n = rnd.choice(cands)
+        new = list(lines)
+        v = n.value
+        if isinstance(v, ast.Dict) and v.keys and rnd.random() < 0.6:
+            i = rnd.randrange(len(v.keys))
+            k = v.values[i]
+            if v.keys[i] is not None and k.lineno == k.end_lineno and v.keys[i].lineno == k.lineno:
+                new[k.lineno - 1:k.lineno] = []
+            else:
+                continue
+        else:
+            consts = [x for x in ast.walk(v) if isinstance(x, ast.Constant) and x.lineno == x.end_lineno
+                      and (isinstance(x.value, (bool, int)) or isinstance(x.value, str) and len(x.value) > 1)]
+            if not consts:
+                continue
+            x = rnd.choice(consts)
+            ln = lines[x.lineno - 1]
+            if isinstance(x.value, bool):
+                rep = str(not x.value)
+            elif isinstance(x.value, int):
+                rep = str(x.value + 1)
+            else:
+                seg = ln[x.col_offset + 1:x.end_col_offset - 1]
+                if not seg:
+                    continue
+                p = rnd.randrange(len(seg))
+                rep = ln[x.col_offset] + seg[:p] + "Q" + seg[p + 1:] + ln[x.end_col_offset - 1]
+            new[x.lineno - 1] = ln[:x.col_offset] + rep + ln[x.end_col_offset:]
+        res = "\n".join(new)
+        try:
+            compile(res, rel, "exec")
+        except Exception:
+            continue
+        return text, res
+    return None
+
+
+def mutate_misc(rel):
+    """Rename a function (its callers keep the old name) or append a new helper."""
+    text = open(f"{src}/{rel}", encoding="utf-8").read()
+    if rnd.random() < 0.5:
+        tree = ast.parse(text)
+        defs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and not n.name.startswith("__")]
+        if not defs:
+            return None
+        n = rnd.choice(defs)
+        lines = text.split("\n")
+        ln = lines[n.lineno - 1]
+        lines[n.lineno - 1] = ln.replace("def " + n.name, "def " + n.name + "_renamed", 1)
+        return text, "\n".join(lines)
+    return text, text.rstrip("\n") + "\n\n\ndef _unused_helper():\n    return 1\n"
+
+
 def mutate_fixture(rel):
     text = open(f"{src}/{rel}", encoding="utf-8").read()
     lines = text.split("\n")
@@ -102,8 +169,37 @@ def mutate_fixture(rel):
     return text, "\n".join(lines)
 
 
+tests_py = [os.path.relpath(dp + "/" + f, src) for dp, _, fs in os.walk(src + "/tests") for f in fs if f.startswith("test_") and f.endswith(".py")]
+MODE = os.environ.get("MODE", "")
 made = 0
 while made < n:
+    if MODE == "div":
+        r_ = rnd.random()
+        if r_ < 0.4:
+            rel = rnd.choice([f for f in files if any(k in f for k in ("dialects/", "parsers/", "generators/", "expressions/", "tokens", "parser.py", "generator.py", "typing/"))])
+            r = mutate_class(rel)
+        elif r_ < 0.55:
+            rel = rnd.choice(tests_py)
+            r = mutate_py(rel)
+        elif r_ < 0.7:
+            rel = rnd.choice(files)
+            r = mutate_misc(rel)
+        else:
+            rel = rnd.choice(files)
+            r = mutate_py(rel)
+        if not r or r[0] == r[1]:
+            continue
+        d = f"{out}/m{made:03d}"
+        os.makedirs(d, exist_ok=True)
+        diff = "".join(difflib.unified_diff(r[0].splitlines(True), r[1].splitlines(True), f"a/{rel}", f"b/{rel}", n=3))
+        if rnd.random() < 0.2:  # multi-file: add an independent second edit
+            rel2 = rnd.choice(files)
+            r2 = mutate_py(rel2)
+            if r2 and r2[0] != r2[1] and rel2 != rel:
+                diff += "diff --git a/%s b/%s\n" % (rel2, rel2) + "".join(difflib.unified_diff(r2[0].splitlines(True), r2[1].splitlines(True), f"a/{rel2}", f"b/{rel2}", n=3))
+        open(f"{d}/m{made:03d}.patch", "w").write("diff --git a/%s b/%s\n" % (rel, rel) + diff)
+        made += 1
+        continue
     if rnd.random() < 0.15:
         rel = rnd.choice(fixtures)
         r = mutate_fixture(rel)

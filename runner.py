@@ -88,7 +88,30 @@ class _Inline:
         return False
 
 
-def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, check=()):
+def _smoke():
+    """Load every dialect and run one trivial statement through it: class-body code that no longer
+    works (e.g. a parsed SQL template built at import) breaks dialect loading for many tests."""
+    bad = []
+    try:
+        import sqlglot
+        from sqlglot.dialects import MODULE_BY_DIALECT
+        names = sorted(MODULE_BY_DIALECT.values())
+    except BaseException:
+        return ["<import>"]
+    for d in names:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 10)
+            if d in ("dax", "prql"):  # not SQL-in dialects: only check that they load
+                sqlglot.Dialect.get_or_raise(d).generator()
+            else:
+                sqlglot.parse_one("SELECT a, b FROM t WHERE x = 1 ORDER BY a", read=d).sql(d)
+        except BaseException:
+            bad.append(d)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    return bad
+
+
+def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, check=(), smoke=False):
     """Runs in the forked child; writes a JSON result line to wfd and exits."""
     res = {"failed": [], "ok": True}
     try:
@@ -120,6 +143,9 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
         if bad:
             res["importerr"] = bad
             nums = []
+        elif smoke:
+            res["smoke_fail"] = _smoke()
+            lap("smoke")
         by_cls = {}
         for n in sorted(nums, key=lambda n: tests[n]["id"]):
             f, c, m = tests[n]["id"].split("::")
@@ -191,13 +217,13 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
 
 
 class Job:
-    def __init__(self, cid, root, src, patched, tests, nums, limits, deadline, failfast=False, check=()):
+    def __init__(self, cid, root, src, patched, tests, nums, limits, deadline, failfast=False, check=(), smoke=False):
         self.cid, self.nums, self.deadline = cid, nums, deadline
         r, w = os.pipe()
         self.pid = os.fork()
         if self.pid == 0:
             os.close(r)
-            child_main(w, root, src, patched, tests, nums, limits, failfast, check)
+            child_main(w, root, src, patched, tests, nums, limits, failfast, check, smoke)
         os.close(w)
         self.fd, self.buf, self.root = r, b"", root
 

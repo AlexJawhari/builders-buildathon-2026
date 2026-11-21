@@ -28,6 +28,10 @@ def keep_heavy(rest, failed):
 
 
 MIN_EVIDENCE = 6
+CPU_MUL = 1.6  # scorer CPU per local CPU second (measured on practice)
+CPU_FIX = 0.6  # per-job fixed CPU on the scorer
+P_PASS = 0.55  # share of candidate sets that turn out to fail nothing
+WIDE_COUNT = 0.5  # ... or when it already names this fraction of all tests
 WIDE = 0.8  # print everything when the chosen set costs this fraction of printing everything
 T0 = time.time()
 
@@ -70,6 +74,10 @@ def main():
         cpu_map = json.loads((Path(MAP) / "cpu.json").read_text())
     except Exception:
         cpu_map = {}
+    try:
+        canary_all = json.loads((Path(MAP) / "canary.json").read_text())
+    except Exception:
+        canary_all = []
     cpu_est = [cpu_map.get(str(t["number"]), t["seconds"]) for t in tests]
     patches = sorted((DATA / "commits").glob("*.patch"))
     out = {}
@@ -83,7 +91,7 @@ def main():
         """Print `nums` packed over workers, or every test when that is nearly as cheap: a wide
         change can fail tests our per-test maps do not tie to it (shared-process contamination)."""
         w, c = pack(nums, ms)
-        out[cid] = pack(list(range(len(tests))), ms)[0] if c >= WIDE * all_cost else w
+        out[cid] = pack(list(range(len(tests))), ms)[0] if c >= WIDE * all_cost or len(set(nums)) >= WIDE_COUNT * len(tests) else w
 
     all_workers = pack(list(range(len(tests))), ms)[0]
     try:
@@ -124,7 +132,9 @@ def main():
                 cpu_map.get("class:%s::%s" % (f, c), 0.0)
                 for f, c in {tuple(tests[n]["id"].split("::")[:2]) for n in rest})
             printed = pack(rest, ms)[1] / 1000
-            run = bool(rest) and s <= RUN_MAX and (heavy or s * 1.1 + 0.4 <= printed)
+            cost_run = CPU_MUL * s + CPU_FIX
+            full = pack(rest + heavy, ms)[1] / 1000
+            run = bool(rest) and s <= RUN_MAX and cost_run < P_PASS * full
             direct = nums + assumed if not run else None
             if run or check:
                 patched = {}
@@ -134,7 +144,8 @@ def main():
                         patched[path] = None
                     elif path.endswith(".py") or path.startswith("tests/"):
                         patched[fd.path] = patchlib.apply(fd, orig(path))
-                jobs_todo.append(dict(cid=cid, patched=patched, run=rest if run else [], heavy=heavy, assumed=assumed,
+                canary = [n for n in canary_all if n not in set(nums)] if check else []
+                jobs_todo.append(dict(cid=cid, patched=patched, run=rest if run else [], heavy=heavy, assumed=assumed, canary=canary,
                                       nums=nums, check=check, direct=direct,
                                       extra={f: mp.import_fail_bits(f) for f in mp.import_files if f.startswith("sqlglot/")}))
             else:
@@ -166,10 +177,12 @@ def main():
             if time.time() - T0 > budget:
                 emit_set(j["cid"], fallback(j))
                 continue
-            limits = {n: max(4.0, 3 * tests[n]["seconds"]) for n in j["run"]}
+            to_run = j["run"] + j["canary"]
+            limits = {n: max(4.0, 3 * tests[n]["seconds"]) for n in to_run}
             try:
-                job = runner.Job(j["cid"], f"/tmp/ov_{j['cid']}", SRC, j["patched"], tests, j["run"], limits,
-                                 time.time() + 40, failfast=bool(j["heavy"]), check=j["check"])
+                job = runner.Job(j["cid"], f"/tmp/ov_{j['cid']}", SRC, j["patched"], tests, to_run, limits,
+                                 time.time() + 40, failfast=bool(j["heavy"] and j["run"]), check=j["check"],
+                                 smoke=bool(j["check"]))
                 running.append((j, job))
             except Exception:
                 log(traceback.format_exc())
@@ -191,12 +204,16 @@ def main():
                     if mp.modname(f) in r["importerr"]:
                         extra |= j["extra"][f]
                 emit_set(cid, j["nums"] + j["assumed"] + bits_to_nums(extra))
+            elif r.get("smoke_fail") or (set(r.get("failed", [])) & set(j["canary"])):
+                log(cid, "canary alarm", r.get("smoke_fail"), sorted(set(r.get("failed", [])) & set(j["canary"]))[:5])
+                emit(cid, all_workers)  # wide blast radius: print everything
             elif not j["run"]:
                 emit_set(cid, j["direct"])
             elif r.get("stopped"):  # heavy kept anyway: the cheap tests ride along for free
                 emit_set(cid, j["run"] + j["assumed"] + j["heavy"])
             else:
-                final = list(r["failed"]) + j["assumed"] + (j["heavy"] if keep_heavy(j["run"], r["failed"]) else [])
+                failed = [n for n in r["failed"] if n not in set(j["canary"])]
+                final = failed + j["assumed"] + (j["heavy"] if keep_heavy(j["run"], failed) else [])
                 emit_set(cid, final)
         time.sleep(0.005)
     for p in patches:
