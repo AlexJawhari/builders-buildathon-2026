@@ -36,3 +36,13 @@ or print candidates packed over <=8 workers. Comment-only .py changes are droppe
 - Cost model recalibrated: run iff 1.6 x local CPU + 0.6 < 0.55 x cost(print everything we would otherwise print). Sample: simulated 94.4 -> 131.6, local CPU 37 -> 17; at the scorer factor 154 -> 159 (neutral on the sample, safer if scorer CPU is slow).
 - Fixed overhead: Mapper() 2 ms, interpreter+imports ~50 ms; the CPU is the tests themselves (30.5 of 35 s on the sample), not setup. No fixed-cost fix found.
 - 182 labeled mutants (one-token, fixtures, deletes, targeted heavy-candidate): 0 misses at this commit (earlier version: 1).
+
+## Round 3 (practice: 8551c38 = 251.0 sim + 18.7 CPU = 269.7 vs b86e759 = 169.7 + 72)
+- The scorer-calibrated run/print model overshot: on the sample it printed 2haz/4d63/5y72 instead of running them (+37 simulated for -19 CPU); practice was +81 for -53. REVERTED to run-when-cheaper-than-printing (RUN_MUL 1.1, RUN_FIX 0.4; heavy candidates always get the evidence run). Sample simulated back to the oracle floor 94.351 (sum of exact failing-set costs).
+- Heavy gamble stats (212 labeled commits): when cheap tests fail, tpcds fails 11/35 (31%), tpch 4/19; proxies (optimizer test_tpcds/test_tpch, executor tests) do not predict it (2 of 21 tpcds failures had no proxy failing, normalize.py edits). No cheaper predictor found; kept.
+- test_generator_memory (6.7 s) dropped from candidates unless generator core changes: removes the heavy evidence-run path for the ~28% of commits where it was the only heavy candidate.
+- Canary escalation now goes to the union (failing dialects' modules + tests/dialects/test_<d>.py, failing canary files, changed-module import failures) and prints everything only through the existing 0.8-cost / 50%-of-tests rules.
+- New hole found by diverse mutants: renaming a function (m017 `def isolate_table_selects` -> `_renamed`) breaks the importing module (727 tests). Fix: the import check also imports every module that imports a changed module (mapper.importer_files, multi-line from-imports handled). 0 misses after.
+- Canary budget 0.25 -> 0.12 s (26 tests, 17 files).
+- Not done: is/== equivalence detection (needs an operand-type profile; `==` on a str-Enum is not strictly equal to `is`), per-line operand profiles like TOP67.
+- Results at this commit (real image): sample 94.351 simulated, 0 misses, CPU 43.1 s (local); 182 mutants 1332.3 simulated, 0 misses, CPU 508.5; 25 diverse mutants 539.3, 0 misses.
