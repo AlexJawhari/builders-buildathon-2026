@@ -30,6 +30,8 @@ class Mapper:
         self.classes = {k: _bits(v) for k, v in _load(f"{data_dir}/classes.z").items()}
         self.opens = {k: _bits(v) for k, v in _load(f"{data_dir}/opens.z").items()}
         self.imp = {k: set(v) for k, v in _load(f"{data_dir}/imp.z").items()}
+        with open(f"{data_dir}/modtouch.json") as f:
+            self.modtouch = json.load(f)  # class -> modules whose import instantiates it
         with open(f"{data_dir}/closure.json") as f:
             self.closure = json.load(f)  # sqlglot file -> test files whose import loads it
         self._lines, self._any, self._ast, self._text, self._ilines = {}, {}, {}, {}, {}
@@ -204,12 +206,13 @@ class Mapper:
         names = self._assigned(inner)
         if classes:
             cb = self._class_bits(mod, classes)
+            mc = self._mod_consumers(mod, classes)
             if isinstance(inner, ast.ClassDef):
-                return r | cb
+                return r | cb | mc
             ub = self._usage_bits(rel, names, own) if names and refine else None
             if ub is None:
-                return r | cb
-            return cb & ub
+                return r | cb | mc
+            return (cb & ub) | mc
         ub = self._usage_bits(rel, names, own) if names and refine else None
         if ub is None:
             return r | self.any_line(rel) | self.importers(rel)
@@ -263,6 +266,19 @@ class Mapper:
                     if m and not pat.search(m.group(1)):
                         continue  # an override / redefinition, not a use
                     r |= self.line_bits(f, i, refine=False)
+        return r
+
+    def _mod_consumers(self, mod, classes):
+        """Class-body code elsewhere builds instances of this class at import (e.g. a parsed SQL
+        template): every test that loads that module sees the changed class definition."""
+        if not classes:
+            return 0
+        q = mod + "." + ".".join(c.name for c in classes)
+        r = 0
+        for rel in self.modtouch.get(q, ()):
+            r |= self.any_line(rel) | self.importers(rel)
+            for f in self.closure.get(rel, ()):
+                r |= self.by_file.get(f, 0)
         return r
 
     def _class_bits(self, mod, classes):

@@ -4,7 +4,7 @@ set -e
 EV=$(cd "$1" && pwd)
 OUT=$EV/output.jsonl
 CID=$(docker create --platform linux/amd64 --network none --cpus 2 --memory 4096m --memory-swap 4096m --pids-limit 256 --read-only \
-  --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp \
+  --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp --env BLAST_DEBUG=${BLAST_DEBUG:-} \
   -v $EV/commits:/data/commits:ro -v $EV/tests.json:/data/tests.json:ro blast-radius-entry)
 START=$(date +%s.%N)
 sh -c "docker start -a $CID > $OUT 2> $EV/stderr.log"

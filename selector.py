@@ -28,6 +28,7 @@ def keep_heavy(rest, failed):
 
 
 MIN_EVIDENCE = 6
+WIDE = 0.8  # print everything when the chosen set costs this fraction of printing everything
 T0 = time.time()
 
 
@@ -76,6 +77,14 @@ def main():
     def emit(cid, workers):
         out[cid] = workers
 
+    all_cost = pack(list(range(len(tests))), ms)[1]
+
+    def emit_set(cid, nums):
+        """Print `nums` packed over workers, or every test when that is nearly as cheap: a wide
+        change can fail tests our per-test maps do not tie to it (shared-process contamination)."""
+        w, c = pack(nums, ms)
+        out[cid] = pack(list(range(len(tests))), ms)[0] if c >= WIDE * all_cost else w
+
     all_workers = pack(list(range(len(tests))), ms)[0]
     try:
         import hashlib
@@ -116,7 +125,7 @@ def main():
                 for f, c in {tuple(tests[n]["id"].split("::")[:2]) for n in rest})
             printed = pack(rest, ms)[1] / 1000
             run = bool(rest) and s <= RUN_MAX and (heavy or s * 1.1 + 0.4 <= printed)
-            direct = pack(nums + assumed, ms)[0] if not run else None
+            direct = nums + assumed if not run else None
             if run or check:
                 patched = {}
                 for fd in fds:
@@ -129,7 +138,7 @@ def main():
                                       nums=nums, check=check, direct=direct,
                                       extra={f: mp.import_fail_bits(f) for f in mp.import_files if f.startswith("sqlglot/")}))
             else:
-                emit(cid, direct if direct is not None else pack(assumed, ms)[0])
+                emit_set(cid, direct if direct is not None else assumed)
             log(cid, len(nums), round(s, 2), "heavy" if heavy else "", "->", "run" if run else ("check" if check else "print"))
         except Exception:
             log(cid, traceback.format_exc())
@@ -146,14 +155,16 @@ def main():
     nproc = 2
 
     def fallback(j):
-        return pack(j["nums"] + j["assumed"] + (bits_to_nums(0) if not j["extra"] else
-                    bits_to_nums(__import__("functools").reduce(lambda x, y: x | y, j["extra"].values()))), ms)[0]
+        extra = 0
+        for v in j["extra"].values():
+            extra |= v
+        return j["nums"] + j["assumed"] + bits_to_nums(extra)
 
     while jobs_todo or running:
         while jobs_todo and len(running) < nproc:
             j = jobs_todo.pop(0)
             if time.time() - T0 > budget:
-                emit(j["cid"], fallback(j))
+                emit_set(j["cid"], fallback(j))
                 continue
             limits = {n: max(4.0, 3 * tests[n]["seconds"]) for n in j["run"]}
             try:
@@ -162,7 +173,7 @@ def main():
                 running.append((j, job))
             except Exception:
                 log(traceback.format_exc())
-                emit(j["cid"], fallback(j))
+                emit_set(j["cid"], fallback(j))
         for item in list(running):
             j, job = item
             r = job.poll()
@@ -173,20 +184,20 @@ def main():
             log(cid, "ran", len(j["run"]), "failed", len(r.get("failed", [])), "cpu", r.get("cpu"), r.get("importerr", ""))
             if not r.get("ok"):
                 log(cid, "run failed", r.get("err"))
-                emit(cid, fallback(j))
+                emit_set(cid, fallback(j))
             elif r.get("importerr"):
                 extra = 0
                 for f in j["extra"]:
                     if mp.modname(f) in r["importerr"]:
                         extra |= j["extra"][f]
-                emit(cid, pack(j["nums"] + j["assumed"] + bits_to_nums(extra), ms)[0])
+                emit_set(cid, j["nums"] + j["assumed"] + bits_to_nums(extra))
             elif not j["run"]:
-                emit(cid, j["direct"])
+                emit_set(cid, j["direct"])
             elif r.get("stopped"):  # heavy kept anyway: the cheap tests ride along for free
-                emit(cid, pack(j["run"] + j["assumed"] + j["heavy"], ms)[0])
+                emit_set(cid, j["run"] + j["assumed"] + j["heavy"])
             else:
                 final = list(r["failed"]) + j["assumed"] + (j["heavy"] if keep_heavy(j["run"], r["failed"]) else [])
-                emit(cid, pack(final, ms)[0])
+                emit_set(cid, final)
         time.sleep(0.005)
     for p in patches:
         print(json.dumps({"commit": p.stem, "workers": out.get(p.stem, all_workers)}))
