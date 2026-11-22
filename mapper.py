@@ -119,6 +119,18 @@ class Mapper:
                         self._sf.append(os.path.relpath(f"{dp}/{f}", self.src))
         return self._sf
 
+    def mentions(self, name):
+        """True when the word `name` appears in any sqlglot or test source."""
+        pat = re.compile(r"\b%s\b" % re.escape(name))
+        if not hasattr(self, "_all_text"):
+            self._all_text = [self.text(f) or "" for f in self.sqlglot_files()]
+            for dp, _, fs in os.walk(f"{self.src}/tests"):
+                for f in fs:
+                    if f.endswith(".py"):
+                        with open(f"{dp}/{f}", encoding="utf-8", errors="replace") as h:
+                            self._all_text.append(h.read())
+        return any(pat.search(t) for t in self._all_text)
+
     def importer_files(self, rel):
         """Source files that import module `rel` (or names from it)."""
         mod = self.modname(rel)

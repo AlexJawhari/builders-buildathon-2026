@@ -129,7 +129,7 @@ def main():
         try:
             fds = patchlib.parse(p.read_text(encoding="utf-8", errors="replace"))
             bits, notes = mp.candidates(fds, orig)
-            proof = cm.affected(fds, orig, lambda fd, old: patchlib.apply(fd, old)) if cm and not os.environ.get("BLAST_NO_CMP") else None
+            proof = cm.affected(fds, orig, lambda fd, old: patchlib.apply(fd, old), mp.mentions) if cm and not os.environ.get("BLAST_NO_CMP") else None
             if proof is not None:  # only comparison operators/literals changed: just the tests whose outcome flips
                 bits, mp.import_files, mp.assumed = (proof | (cm.unknown & bits)) & mp.all_bits, set(), 0
             assumed = bits_to_nums(mp.assumed & mp.all_bits)
@@ -197,10 +197,10 @@ def main():
                 emit_set(j["cid"], fallback(j))
                 continue
             to_run = j["run"] + j["canary"]
-            limits = {n: max(4.0, 3 * tests[n]["seconds"]) for n in to_run}
+            limits = {n: max(6.0, 5 * tests[n]["seconds"]) for n in to_run}
             try:
                 job = runner.Job(j["cid"], f"/tmp/ov_{j['cid']}", SRC, j["patched"], tests, to_run, limits,
-                                 time.time() + 40, failfast=bool(j["heavy"] and j["run"]), check=j["check"],
+                                 time.time() + 80, failfast=bool(j["heavy"] and j["run"]), check=j["check"],
                                  smoke=bool(j["check"]))
                 running.append((j, job))
             except Exception:

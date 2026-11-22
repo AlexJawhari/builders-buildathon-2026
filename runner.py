@@ -109,14 +109,14 @@ def _smoke():
         return ["<import>"]
     for d in names:
         try:
-            signal.setitimer(signal.ITIMER_REAL, 10)
+            signal.setitimer(signal.ITIMER_PROF, 10)
             if d in ("dax", "prql"):  # not SQL-in dialects: only check that they load
                 sqlglot.Dialect.get_or_raise(d).generator()
             else:
                 sqlglot.parse_one("SELECT a, b FROM t WHERE x = 1 ORDER BY a", read=d).sql(d)
         except BaseException:
             bad.append(d)
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.setitimer(signal.ITIMER_PROF, 0)
     return bad
 
 
@@ -143,16 +143,16 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
         os.environ["PYTHONPATH"] = root
         import concurrent.futures as cf
         cf.ProcessPoolExecutor = _Inline
-        signal.signal(signal.SIGALRM, _alarm)
+        signal.signal(signal.SIGPROF, _alarm)
         import importlib
         bad = []
         for modname in check:  # a changed module that no longer imports breaks everything that loads it
             try:
-                signal.setitimer(signal.ITIMER_REAL, 30)
+                signal.setitimer(signal.ITIMER_PROF, 30)
                 importlib.import_module(modname)
             except BaseException:
                 bad.append(modname)
-            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.setitimer(signal.ITIMER_PROF, 0)
         lap("check imports")
         if bad:
             res["importerr"] = bad
@@ -168,14 +168,14 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
         order = sorted(by_cls.items(), key=lambda kv: sum(tests[n]["seconds"] for _, n in kv[1]))
         for (f, c), items in order:
             try:
-                signal.setitimer(signal.ITIMER_REAL, 30)
+                signal.setitimer(signal.ITIMER_PROF, 30)
                 import sqlglot  # noqa: F401  (timed separately)
                 lap("import sqlglot")
                 cls = getattr(importlib.import_module(f[:-3].replace("/", ".")), c)
-                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.setitimer(signal.ITIMER_PROF, 0)
                 lap("import " + f)
             except BaseException:
-                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.setitimer(signal.ITIMER_PROF, 0)
                 failed.update(n for _, n in items)  # an unimportable file fails its tests
                 continue
             byname = {m: n for m, n in items}
@@ -183,10 +183,10 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
             class R(unittest.TestResult):
                 def startTest(self, test):
                     super().startTest(test)
-                    signal.setitimer(signal.ITIMER_REAL, limits.get(byname.get(test._testMethodName), 10))
+                    signal.setitimer(signal.ITIMER_PROF, limits.get(byname.get(test._testMethodName), 10))
 
                 def stopTest(self, test):
-                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    signal.setitimer(signal.ITIMER_PROF, 0)
                     super().stopTest(test)
 
                 def _mark(self, test):
@@ -219,7 +219,7 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
                 suite.run(R())
             except BaseException:
                 failed.update(byname.values())
-            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.setitimer(signal.ITIMER_PROF, 0)
             lap("run " + c)
             if failfast and failed:
                 break

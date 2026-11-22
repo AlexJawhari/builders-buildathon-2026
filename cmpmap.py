@@ -13,6 +13,7 @@ import json
 import marshal
 import operator
 import os
+import re
 import zlib
 
 OPS = (ast.Is, ast.IsNot, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn)
@@ -56,6 +57,46 @@ def digit(sig, i):
     return (sig // 3 ** i) % 3
 
 
+def strip_docstrings(tree):
+    """Docstrings are inert here (only core.py reads __doc__, and only to default it to "")."""
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.body:
+            f = n.body[0]
+            if isinstance(f, ast.Expr) and isinstance(f.value, ast.Constant) and isinstance(f.value.value, str):
+                n.body = n.body[1:] or [ast.Pass(lineno=f.lineno, col_offset=0)]
+    return tree
+
+
+_ANN = {"int", "str", "bool", "float", "bytes", "list", "dict", "tuple", "set", "object"}
+
+
+def _plain_def(n):
+    """A def whose creation at import cannot fail or have effects: no decorators, constant defaults, trivial annotations."""
+    if not isinstance(n, ast.FunctionDef) or n.decorator_list or n.name.startswith("__"):
+        return False
+    a = n.args
+    ann = [x.annotation for x in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg] if x is not None] + [n.returns]
+    return (all(isinstance(d, ast.Constant) for d in a.defaults + [d for d in a.kw_defaults if d is not None])
+            and all(x is None or (isinstance(x, ast.Name) and x.id in _ANN) or (isinstance(x, ast.Constant) and x.value is None)
+                    for x in ann))
+
+
+def drop_unused_defs(old_tree, new_tree, new_text, mentions):
+    """Remove new top-level plain functions that nothing mentions anywhere (never called, never looked up by name)."""
+    have = {n.name for n in old_tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    keep = []
+    for n in new_tree.body:
+        if n.name in have if isinstance(n, ast.FunctionDef) else True:
+            keep.append(n)
+            continue
+        if _plain_def(n) and not mentions(n.name):
+            seg = ast.get_source_segment(new_text, n) or ""
+            if len(re.findall(r"\b%s\b" % re.escape(n.name), new_text)) == len(re.findall(r"\b%s\b" % re.escape(n.name), seg)):
+                continue
+        keep.append(n)
+    new_tree.body = keep
+
+
 class _Diff:
     def __init__(self):
         self.edits = []  # (line, col, old op idx, new op idx, const side, (old, new) literal or None)
@@ -95,8 +136,16 @@ class _Diff:
                 and isinstance(a.value, ast.Dict) and isinstance(b.value, ast.Dict)
                 and len(a.value.keys) == len(b.value.keys) and self.walk(a.targets[0], b.targets[0])):
             for k1, k2, v1, v2 in zip(a.value.keys, b.value.keys, a.value.values, b.value.values):
-                if not (isinstance(k1, ast.Constant) and self.walk(k1, k2)):
+                if k1 is None:  # ** unpacking
+                    if k2 is not None or not self.walk(v1, v2):
+                        return False
+                    continue
+                if not self.walk(k1, k2):
                     return False
+                if not isinstance(k1, ast.Constant):
+                    if not self.walk(v1, v2):
+                        return False
+                    continue
                 if (isinstance(v1, ast.Constant) and isinstance(v2, ast.Constant) and type(v1.value) is bool
                         and type(v2.value) is bool and v1.value != v2.value):
                     self.flags.append((".".join(self.stack), k1.value))
@@ -135,7 +184,7 @@ class CmpMap:
         self.flags = {k: int.from_bytes(v, "little") for k, v in d.get("flags", {}).items()}
         self.unknown = int.from_bytes(d.get("unknown", b""), "little")  # tests with no recording
 
-    def affected(self, fds, orig, parse_new):
+    def affected(self, fds, orig, parse_new, mentions=lambda name: True):
         """Bitset of tests that may behave differently, or None when the patch is not eligible.
         Tests with no recording (self.unknown) are left to the caller."""
         edits, flags = [], []
@@ -151,9 +200,11 @@ class CmpMap:
             if old is None or new is None:
                 return None
             try:
-                ta, tb = ast.parse(old), ast.parse(new)
+                ta, tb = strip_docstrings(ast.parse(old)), strip_docstrings(ast.parse(new))
             except SyntaxError:
                 return None
+            if len(tb.body) > len(ta.body):
+                drop_unused_defs(ta, tb, new, mentions)
             d = _Diff()
             if not d.walk(ta, tb):
                 return None
