@@ -216,6 +216,7 @@ class CmpMap:
                 if sid is None:
                     return None
                 edits.append((sid,) + e[2:])
+        self.had_edits = bool(edits or flags)
         bits = 0
         for fk in flags:
             bits |= self.flags.get(fk, 0)

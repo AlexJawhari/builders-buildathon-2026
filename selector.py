@@ -27,7 +27,7 @@ def keep_heavy(rest, failed):
     return bool(failed) or len(rest) < MIN_EVIDENCE
 
 
-MIN_EVIDENCE = 6
+MIN_EVIDENCE = 2  # 0 heavy-only failures in 59 labeled commits whose cheap candidates passed
 GEN_CORE = {"sqlglot/generator.py", "sqlglot/dialects/dialect.py", "sqlglot/generators/base.py"}
 RUN_MUL = 1.1
 RUN_FIX = 0.4
@@ -79,6 +79,11 @@ def main():
         canary_all = json.loads((Path(MAP) / "canary.json").read_text())
     except Exception:
         canary_all = []
+    try:
+        noise_ids = set(json.loads((Path(MAP) / "noise.json").read_text()))
+    except Exception:
+        noise_ids = set()
+    noise = {t["number"] for t in tests if t["id"] in noise_ids}
     gm = next((t["number"] for t in tests if t["id"].endswith("TestGenerator::test_generator_memory")), None)
     cpu_est = [cpu_map.get(str(t["number"]), t["seconds"]) for t in tests]
     patches = sorted((DATA / "commits").glob("*.patch"))
@@ -131,7 +136,7 @@ def main():
             bits, notes = mp.candidates(fds, orig)
             proof = cm.affected(fds, orig, lambda fd, old: patchlib.apply(fd, old), mp.mentions) if cm and not os.environ.get("BLAST_NO_CMP") else None
             if proof is not None:  # only comparison operators/literals changed: just the tests whose outcome flips
-                bits, mp.import_files, mp.assumed = (proof | (cm.unknown & bits)) & mp.all_bits, set(), 0
+                bits, mp.import_files, mp.assumed = (proof | (cm.unknown & bits if cm.had_edits else 0)) & mp.all_bits, set(), 0
             assumed = bits_to_nums(mp.assumed & mp.all_bits)
             bits &= ~mp.assumed
             nums = bits_to_nums(bits)
@@ -201,7 +206,7 @@ def main():
             try:
                 job = runner.Job(j["cid"], f"/tmp/ov_{j['cid']}", SRC, j["patched"], tests, to_run, limits,
                                  time.time() + 80, failfast=bool(j["heavy"] and j["run"]), check=j["check"],
-                                 smoke=bool(j["check"]))
+                                 smoke=bool(j["check"]), noise=noise)
                 running.append((j, job))
             except Exception:
                 log(traceback.format_exc())
@@ -213,7 +218,8 @@ def main():
                 continue
             running.remove(item)
             cid = j["cid"]
-            log(cid, "ran", len(j["run"]), "failed", len(r.get("failed", [])), "cpu", r.get("cpu"), r.get("importerr", ""))
+            log(cid, "ran", len(j["run"]), "failed", len(r.get("failed", [])), "cpu", r.get("cpu"), r.get("importerr", ""),
+                [tests[n]["id"].split("::", 1)[1] for n in r.get("failed", [])[:3]])
             if not r.get("ok"):
                 log(cid, "run failed", r.get("err"))
                 emit_set(cid, fallback(j))
@@ -246,7 +252,7 @@ def main():
                 emit_set(cid, j["run"] + j["assumed"] + j["heavy"])
             else:
                 failed = [n for n in r["failed"] if n not in set(j["canary"])]
-                final = failed + j["assumed"] + (j["heavy"] if keep_heavy(j["run"], failed) else [])
+                final = failed + j["assumed"] + (j["heavy"] if keep_heavy(j["run"], [n for n in failed if n not in noise]) else [])
                 emit_set(cid, final)
         time.sleep(0.005)
     for p in patches:

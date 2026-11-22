@@ -120,7 +120,7 @@ def _smoke():
     return bad
 
 
-def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, check=(), smoke=False):
+def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, check=(), smoke=False, noise=()):
     """Runs in the forked child; writes a JSON result line to wfd and exits."""
     res = {"failed": [], "ok": True}
     try:
@@ -190,9 +190,9 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
                     super().stopTest(test)
 
                 def _mark(self, test):
-                    if failfast:
-                        self.stop()
                     n = byname.get(getattr(test, "_testMethodName", None))
+                    if failfast and n not in noise:  # noise: fails on the pristine tree too, says nothing
+                        self.stop()
                     if n is None:  # setUpClass / tearDownClass / module fixture failure
                         failed.update(byname.values())
                     else:
@@ -221,10 +221,10 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
                 failed.update(byname.values())
             signal.setitimer(signal.ITIMER_PROF, 0)
             lap("run " + c)
-            if failfast and failed:
+            if failfast and failed - set(noise):
                 break
         res["failed"] = sorted(failed)
-        res["stopped"] = bool(failfast and failed)
+        res["stopped"] = bool(failfast and failed - set(noise))
     except BaseException as e:  # any internal failure: caller falls back to printing candidates
         res = {"failed": [], "ok": False, "err": repr(e)[:200]}
     try:
@@ -234,13 +234,13 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
 
 
 class Job:
-    def __init__(self, cid, root, src, patched, tests, nums, limits, deadline, failfast=False, check=(), smoke=False):
+    def __init__(self, cid, root, src, patched, tests, nums, limits, deadline, failfast=False, check=(), smoke=False, noise=()):
         self.cid, self.nums, self.deadline = cid, nums, deadline
         r, w = os.pipe()
         self.pid = os.fork()
         if self.pid == 0:
             os.close(r)
-            child_main(w, root, src, patched, tests, nums, limits, failfast, check, smoke)
+            child_main(w, root, src, patched, tests, nums, limits, failfast, check, smoke, noise)
         os.close(w)
         self.fd, self.buf, self.root = r, b"", root
 
