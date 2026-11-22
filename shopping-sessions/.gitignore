@@ -1,0 +1,12 @@
+target/
+data/
+dev/
+out/
+big*/
+*.parquet
+COMPETITORS.md
+NOTES.md
+TOP67*.md
+TECHNIQUES.md
+RESEARCH.md
+HUNT.md
