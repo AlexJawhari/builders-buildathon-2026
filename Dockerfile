@@ -11,7 +11,7 @@ RUN for i in 1 2 3 4 5; do python /tmp/fetch.py && break || sleep 10; done \
  && mv /tmp/x/sqlglot-* /opt/sqlglot && rm -rf /tmp/x /tmp/fetch.py \
  && python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests \
  && chmod -R a+rX /opt/sqlglot
-COPY selector.py patchlib.py mapper.py runner.py /app/
+COPY selector.py patchlib.py mapper.py runner.py cmpmap.py /app/
 COPY data /app/data
 RUN python -m compileall -q /app && chmod -R a+rX /app
 CMD ["python", "/app/selector.py"]

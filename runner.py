@@ -88,6 +88,15 @@ class _Inline:
         return False
 
 
+_TPC_USERS = {"test_optimized_tpch", "test_execute_tpch", "test_execute_tpcds"}
+
+
+def _exec_stub(cls):
+    cls.cache = {}
+    cls.tpch_sqls = cls.tpcds_sqls = []
+    cls.tpch_tables = cls.tpcds_tables = {}
+
+
 def _smoke():
     """Load every dialect and run one trivial statement through it: class-body code that no longer
     works (e.g. a parsed SQL template built at import) breaks dialect loading for many tests."""
@@ -123,7 +132,12 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
                 now = time.process_time()
                 print(f"  [{os.path.basename(root)}] {name} {now - _t[0]:.3f}", file=sys.stderr)
                 _t[0] = now
+        import gc
+        gc.freeze()
+        gc.set_threshold(50000, 20, 100)  # fewer collections: ~3% less CPU, memory stays far below the cap
         build_overlay(root, src, patched)
+        # the stub is only valid while neither the executor tests nor the TPC fixtures are edited
+        lazy_exec = not any(p.startswith(("tests/test_executor", "tests/fixtures/optimizer/tpc")) for p in patched)
         lap("overlay")
         sys.path.insert(0, root)
         os.environ["PYTHONPATH"] = root
@@ -197,6 +211,9 @@ def child_main(wfd, root, src, patched, tests, nums, limits, failfast=False, che
                 def addUnexpectedSuccess(self, test):
                     self._mark(test)
 
+            if c == "TestExecutor" and lazy_exec and not (set(byname) & _TPC_USERS):
+                cls.setUpClass = classmethod(_exec_stub)  # skip loading the TPC-H/DS tables nobody here reads
+                cls.tearDownClass = classmethod(lambda k: None)
             suite = unittest.TestSuite([cls(m) for m, _ in items])
             try:
                 suite.run(R())

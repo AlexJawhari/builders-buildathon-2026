@@ -34,6 +34,7 @@ RUN_FIX = 0.4
 WIDE_COUNT = 0.5  # ... or when it already names this fraction of all tests
 WIDE = 0.8  # print everything when the chosen set costs this fraction of printing everything
 T0 = time.time()
+PAR_AFTER = 70.0
 
 
 def log(*a):
@@ -104,6 +105,11 @@ def main():
         if hashlib.sha1("\n".join(t["id"] for t in tests).encode()).hexdigest() != want:
             raise RuntimeError("tests.json differs from the map's test list")
         mp = mapper.Mapper(MAP, SRC, tests)
+        try:
+            import cmpmap
+            cm = cmpmap.CmpMap(MAP, len(tests))
+        except Exception:
+            cm = None
     except Exception:
         log(traceback.format_exc())
         for p in patches:
@@ -123,6 +129,9 @@ def main():
         try:
             fds = patchlib.parse(p.read_text(encoding="utf-8", errors="replace"))
             bits, notes = mp.candidates(fds, orig)
+            proof = cm.affected(fds, orig, lambda fd, old: patchlib.apply(fd, old)) if cm and not os.environ.get("BLAST_NO_CMP") else None
+            if proof is not None:  # only comparison operators/literals changed: just the tests whose outcome flips
+                bits, mp.import_files, mp.assumed = (proof | (cm.unknown & bits)) & mp.all_bits, set(), 0
             assumed = bits_to_nums(mp.assumed & mp.all_bits)
             bits &= ~mp.assumed
             nums = bits_to_nums(bits)
@@ -168,9 +177,11 @@ def main():
                 __import__(m)
             except Exception:
                 pass
-    budget = 4.5 * len(patches) * 0.7
+    budget = float(os.environ.get('BLAST_BUDGET', 4.5 * len(patches) * 0.7))
     running = []
-    nproc = 2
+    # one child at a time: two concurrent children cost ~8% more CPU (shared caches/SMT); go parallel only
+    # when the batch is running long (limit is 3-4.5 minutes of wall time)
+    fixed_nproc = os.environ.get('BLAST_NPROC')
 
     def fallback(j):
         extra = 0
@@ -179,6 +190,7 @@ def main():
         return j["nums"] + j["assumed"] + bits_to_nums(extra)
 
     while jobs_todo or running:
+        nproc = int(fixed_nproc) if fixed_nproc else (1 if time.time() - T0 < PAR_AFTER else 2)
         while jobs_todo and len(running) < nproc:
             j = jobs_todo.pop(0)
             if time.time() - T0 > budget:
