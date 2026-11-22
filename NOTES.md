@@ -55,4 +55,4 @@ or print candidates packed over <=8 workers. Comment-only .py changes are droppe
 - runner: TestExecutor.setUpClass (loads TPC-H/DS csv, 0.9 s local) is replaced by a stub unless a selected test needs it and the executor tests/fixtures are not patched; gc threshold raised (~3%).
 - selector: one child at a time until 70 s of wall time (two concurrent children cost ~8% more CPU); budget/time guards unchanged.
 - Remaining CPU on the sample is dominated by 4d63 (tuple literal in a tokenizer table, 273 candidates, 10 s). Next idea: key-level read map for class tables.
-- Studied colinbenaissa/blast-radius-selector (no tests run at scoring time): same families of proofs (comparison profiles, import-time state diff of every module global/class attribute, name-mention + class-touch narrowing). Their import-state digest diff is the better answer for class-table edits like 4d63; ours stays run-based there.
+- Other public entries (static, run no tests) use the same families of proofs; an import-time state digest diff of module globals/class attributes would be the better answer for class-table edits like 4d63; ours stays run-based there.
