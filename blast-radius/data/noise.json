@@ -1,0 +1,1 @@
+["tests/dialects/test_dialect.py::TestDialect::test_enum", "tests/dialects/test_starrocks.py::TestStarrocks::test_time_slice_origin_roundtrip"]

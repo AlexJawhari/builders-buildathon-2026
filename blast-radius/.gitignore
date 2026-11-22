@@ -1,0 +1,10 @@
+output.jsonl
+__pycache__/
+*.pyc
+stderr.log
+COMPETITORS.md
+NOTES.md
+TOP67*.md
+TECHNIQUES.md
+RESEARCH.md
+HUNT.md
